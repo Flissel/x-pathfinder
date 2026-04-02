@@ -1,4 +1,9 @@
 __pycache__/
 *.pyc
+*.pyo
 *.db
+.env
 .x_pathfinder/
+knowledge/
+emails_export.csv
+hot_backers.json
