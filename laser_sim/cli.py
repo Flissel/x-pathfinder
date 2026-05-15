@@ -247,6 +247,12 @@ def evolve(
     hf_case_root: Path = typer.Option(
         Path("./hf_runs"), "--hf-case-root", help="root directory for promoted HF cases"
     ),
+    live_serve: bool = typer.Option(
+        False,
+        "--serve",
+        help="spin up the Flask dashboard + SSE stream alongside the EA (http://127.0.0.1:8765/live)",
+    ),
+    live_port: int = typer.Option(8765, "--serve-port"),
 ) -> None:
     """Run the NSGA-II evolutionary loop with the Eagar-Tsai proxy.
 
@@ -384,6 +390,36 @@ def evolve(
             )
         )
 
+    event_bus = None
+    server_thread = None
+    if live_serve:
+        import threading as _threading
+
+        from laser_sim.control_plane.events import EventBus
+        from laser_sim.visualization.web_app import serve as _live_serve
+
+        event_bus = EventBus()
+        db_for_server = persist_db or Path("laser_sim_campaigns.db")
+        server_thread = _threading.Thread(
+            target=_live_serve,
+            kwargs=dict(
+                db_path=db_for_server,
+                event_bus=event_bus,
+                host="127.0.0.1",
+                port=live_port,
+                debug=False,
+            ),
+            daemon=True,
+        )
+        server_thread.start()
+        _console.print(
+            f"[bold magenta]live dashboard:[/bold magenta] "
+            f"http://127.0.0.1:{live_port}/live  (open in browser before EA starts)"
+        )
+        import time as _time
+
+        _time.sleep(1.5)  # give the server a beat to bind
+
     eng = GeneticEngine(
         material=sc.material,
         machine=sc.machine,
@@ -393,8 +429,21 @@ def evolve(
         on_generation=_on_gen,
         cache=accumulator,
         on_commit=_commit,
+        event_bus=event_bus,
     )
     log = eng.run()
+    if live_serve and event_bus is not None:
+        _console.print(
+            f"[bold]live dashboard still running at[/bold] "
+            f"http://127.0.0.1:{live_port}/live — Ctrl+C to stop"
+        )
+        try:
+            import time as _time
+
+            while True:
+                _time.sleep(3600)
+        except KeyboardInterrupt:
+            pass
     if db_handle is not None:
         db_handle.close()
     for r in rows:

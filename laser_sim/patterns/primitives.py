@@ -265,6 +265,66 @@ def _build_voronoi(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]
     return tuple(segments)
 
 
+def _build_adaptive_patch(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
+    """Adaptive patch: ROI split into NxM tiles, each tile gets its own
+    (P, v, hatch_um) overrides drawn from a per-tile spec table.
+
+    Use case: hot spots near edges, cooler in the interior — the EA can
+    evolve a power/speed map across the part.
+
+    params:
+      grid_nx, grid_ny: tile grid resolution (default 2x2)
+      tile_specs: list of dicts with optional keys
+          {power_W, speed_mm_s, hatch_um, rotation_deg}
+        Length must equal grid_nx*grid_ny. Defaults inherit from spec.
+        If omitted, every tile uses spec defaults but with a per-tile
+        deterministic rotation jitter so something differs.
+    """
+    gnx = max(1, int(spec.params.get("grid_nx", 2)))
+    gny = max(1, int(spec.params.get("grid_ny", 2)))
+    tile_specs = spec.params.get("tile_specs")
+    if tile_specs is not None and len(tile_specs) != gnx * gny:
+        raise ValueError(
+            f"adaptive_patch: tile_specs length {len(tile_specs)} != grid {gnx}*{gny}"
+        )
+    cx = 0.5 * (roi.x0_mm + roi.x1_mm)
+    cy = 0.5 * (roi.y0_mm + roi.y1_mm)
+    tile_w = roi.width_mm / gnx
+    tile_h = roi.height_mm / gny
+    segments: list[Segment] = []
+    for ix in range(gnx):
+        for iy in range(gny):
+            idx = ix * gny + iy
+            x0 = roi.x0_mm + ix * tile_w
+            x1 = x0 + tile_w
+            y0 = roi.y0_mm + iy * tile_h
+            y1 = y0 + tile_h
+            tile_spec = (tile_specs or [{}])[idx] if tile_specs else {}
+            p = float(tile_spec.get("power_W", spec.power_W))
+            v = float(tile_spec.get("speed_mm_s", spec.speed_mm_s))
+            h = float(tile_spec.get("hatch_um", spec.hatch_um))
+            rot = float(tile_spec.get("rotation_deg", spec.rotation_deg + (idx * 17.0) % 90))
+            h_mm = h * 1e-3
+            n_lines = max(2, int((y1 - y0) / h_mm) + 1)
+            ys = np.linspace(y0, y1, n_lines)
+            for li, y in enumerate(ys):
+                if li % 2 == 0:
+                    p0 = np.array([x0, y])
+                    p1 = np.array([x1, y])
+                else:
+                    p0 = np.array([x1, y])
+                    p1 = np.array([x0, y])
+                pts = _rotate(np.stack([p0, p1]), rot, (cx, cy))
+                segments.append(
+                    Segment(
+                        waypoints=(Waypoint(*pts[0]), Waypoint(*pts[1])),
+                        power_W=p,
+                        speed_mm_s=v,
+                    )
+                )
+    return tuple(segments)
+
+
 def _build_island(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
     """Chess-board / island scanning: ROI tiled into N x N tiles, each filled
     with a small zigzag, neighbouring tiles rotated 90 deg to disrupt
@@ -381,6 +441,7 @@ _BUILDERS: dict[PrimitiveKind, Callable[[PrimitiveSpec, GeometryROI], tuple[Segm
     PrimitiveKind.HILBERT: _build_hilbert,
     PrimitiveKind.ISLAND: _build_island,
     PrimitiveKind.VORONOI: _build_voronoi,
+    PrimitiveKind.ADAPTIVE_PATCH: _build_adaptive_patch,
     PrimitiveKind.WAYPOINT: _build_waypoint,
 }
 

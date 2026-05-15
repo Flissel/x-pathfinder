@@ -124,9 +124,50 @@ def test_total_time_consistent_with_length() -> None:
     assert math.isclose(pat.total_time_s(), expected_s, rel_tol=1e-9)
 
 
-def test_unimplemented_primitive_raises(roi: GeometryROI) -> None:
-    with pytest.raises(NotImplementedError):
-        build_primitive(_spec(PrimitiveKind.ADAPTIVE_PATCH), roi)
+def test_all_primitives_implemented(roi: GeometryROI) -> None:
+    """Every PrimitiveKind in the enum now has a working builder."""
+    for kind in PrimitiveKind:
+        spec_params: dict = {}
+        if kind is PrimitiveKind.WAYPOINT:
+            spec_params["waypoints"] = [(-1.0, 0.0), (0.0, 1.0), (1.0, 0.0)]
+        spec = _spec(kind, params=spec_params)
+        pat = build_primitive(spec, roi)
+        assert len(pat.segments) >= 1, f"{kind.value} produced no segments"
+
+
+def test_adaptive_patch_grid_tiles(roi: GeometryROI) -> None:
+    spec = _spec(PrimitiveKind.ADAPTIVE_PATCH, hatch_um=200,
+                 params={"grid_nx": 2, "grid_ny": 2})
+    pat = build_primitive(spec, roi)
+    # 2x2 tiles each with at least 2 raster lines -> >= 8 segments
+    assert len(pat.segments) >= 8
+
+
+def test_adaptive_patch_per_tile_specs(roi: GeometryROI) -> None:
+    spec = _spec(
+        PrimitiveKind.ADAPTIVE_PATCH,
+        hatch_um=200,
+        params={
+            "grid_nx": 2,
+            "grid_ny": 1,
+            "tile_specs": [
+                {"power_W": 100, "speed_mm_s": 500},
+                {"power_W": 300, "speed_mm_s": 1500},
+            ],
+        },
+    )
+    pat = build_primitive(spec, roi)
+    powers = {round(s.power_W) for s in pat.segments}
+    assert powers == {100, 300}
+
+
+def test_adaptive_patch_rejects_bad_tile_specs(roi: GeometryROI) -> None:
+    spec = _spec(
+        PrimitiveKind.ADAPTIVE_PATCH,
+        params={"grid_nx": 2, "grid_ny": 2, "tile_specs": [{"power_W": 100}]},  # only 1
+    )
+    with pytest.raises(ValueError):
+        build_primitive(spec, roi)
 
 
 def test_island_tiles_partition_roi(roi: GeometryROI) -> None:

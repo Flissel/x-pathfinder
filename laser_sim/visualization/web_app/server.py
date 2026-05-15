@@ -19,8 +19,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, abort, jsonify, send_file, send_from_directory
+from flask import Flask, Response, abort, jsonify, send_file, send_from_directory
 
+from laser_sim.control_plane.events import EventBus
 from laser_sim.storage import open_database
 
 _THREE_JS_DIR = Path(__file__).resolve().parents[1] / "three_js_app"
@@ -70,7 +71,11 @@ __ARCHIVE_ROWS__
 """
 
 
-def create_app(db_path: Path, scene_json: Path | None = None) -> Flask:
+def create_app(
+    db_path: Path,
+    scene_json: Path | None = None,
+    event_bus: EventBus | None = None,
+) -> Flask:
     app = Flask(__name__, static_folder=str(_THREE_JS_DIR), static_url_path="/static")
     db_path = Path(db_path)
     scene_path = Path(scene_json) if scene_json else None
@@ -191,6 +196,42 @@ def create_app(db_path: Path, scene_json: Path | None = None) -> Flask:
     def viewer():
         return send_from_directory(_THREE_JS_DIR, "index.html")
 
+    @app.route("/live")
+    def live():
+        return send_from_directory(_THREE_JS_DIR, "live.html")
+
+    @app.route("/api/stream")
+    def api_stream():
+        if event_bus is None:
+            abort(404)
+
+        def _gen():
+            q, backlog = event_bus.subscribe()
+            try:
+                # send historical events first so a late-joining browser
+                # sees prior generations
+                for ev in backlog:
+                    yield ev.to_sse()
+                while True:
+                    try:
+                        ev = q.get(timeout=15)
+                        yield ev.to_sse()
+                    except Exception:
+                        # keep-alive ping so proxies don't time us out
+                        yield ": keep-alive\n\n"
+            finally:
+                event_bus.unsubscribe(q)
+
+        return Response(
+            _gen(),
+            mimetype="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection": "keep-alive",
+            },
+        )
+
     @app.route("/scene.json")
     def scene_serve():
         if scene_path is None or not scene_path.exists():
@@ -206,6 +247,7 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 8765,
     debug: bool = False,
+    event_bus: EventBus | None = None,
 ) -> None:
-    app = create_app(db_path=db_path, scene_json=scene_json)
-    app.run(host=host, port=port, debug=debug)
+    app = create_app(db_path=db_path, scene_json=scene_json, event_bus=event_bus)
+    app.run(host=host, port=port, debug=debug, threaded=True)

@@ -64,6 +64,9 @@ def _kind_swap(c: Chromosome, machine: MachineConfig, sigma_mult: float, rng: ra
         extras["n_cells"] = rng.choice([4, 6, 8, 12, 16])
         extras["lloyd_iter"] = rng.choice([1, 2, 3])
         extras["seed"] = rng.randrange(0, 1_000_000)
+    elif new is PrimitiveKind.ADAPTIVE_PATCH:
+        extras["grid_nx"] = rng.choice([2, 3])
+        extras["grid_ny"] = rng.choice([2, 3])
     return replace(c, primitive_kind=new, extras=extras).clamped(machine)
 
 

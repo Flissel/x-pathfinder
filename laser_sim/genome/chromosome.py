@@ -111,6 +111,9 @@ def random_chromosome(machine: MachineConfig, rng: random.Random) -> Chromosome:
         extras["n_cells"] = rng.choice([4, 6, 8, 12, 16])
         extras["lloyd_iter"] = rng.choice([1, 2, 3])
         extras["seed"] = rng.randrange(0, 1_000_000)
+    elif kind is PrimitiveKind.ADAPTIVE_PATCH:
+        extras["grid_nx"] = rng.choice([2, 3])
+        extras["grid_ny"] = rng.choice([2, 3])
     return Chromosome(
         primitive_kind=kind,
         power_W=rng.uniform(las.power_min_W, las.power_max_W),

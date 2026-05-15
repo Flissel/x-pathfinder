@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Protocol
 
 from laser_sim.config.schema import EAConfig, GeometryROI, MachineConfig, MaterialConfig
+from laser_sim.control_plane.events import EventBus, EventType, EvolutionEvent
 from laser_sim.fitness.evaluator import FitnessVector, PatternEvaluator
 from laser_sim.genome.archive import (
     ArchiveEntry,
@@ -80,6 +81,7 @@ class GeneticEngine:
         on_generation: Callable[[GenerationStats], None] | None = None,
         cache: EvalCache | dict[str, ArchiveEntry] | None = None,
         on_commit: Callable[[int, list[ArchiveEntry]], None] | None = None,
+        event_bus: EventBus | None = None,
     ) -> None:
         self.material = material
         self.machine = machine
@@ -94,6 +96,7 @@ class GeneticEngine:
         # from disk), seed the archive with its entries
         self._seed_archive_from_cache()
         self.on_commit = on_commit
+        self.event_bus = event_bus
         self._current_generation = 0
 
     def _seed_archive_from_cache(self) -> None:
@@ -168,8 +171,22 @@ class GeneticEngine:
                 crowding[i] = cds[k]
         return ranks, crowding
 
+    def _publish(self, event_type: EventType, payload: dict[str, Any]) -> None:
+        if self.event_bus is not None:
+            self.event_bus.publish(EvolutionEvent(type=event_type, payload=payload))
+
     def run(self, generations: int | None = None) -> EvolutionLog:
         gens = generations if generations is not None else self.ea.generations
+        self._publish(
+            EventType.CAMPAIGN_START,
+            {
+                "population": self.ea.population,
+                "generations": gens,
+                "seed": self.ea.seed,
+                "scenario_material": self.material.material_id,
+                "scenario_machine": self.machine.machine_id,
+            },
+        )
         population = self._initial_population()
         for e in population:
             self.archive.add(e)
@@ -226,9 +243,47 @@ class GeneticEngine:
             if self.on_commit is not None:
                 self.on_commit(g, self.archive.entries)
 
+            best_entry = self.archive.best_by_scalar()
+            best_chrom: dict[str, Any] = {}
+            if best_entry is not None:
+                bc = best_entry.chromosome
+                best_chrom = {
+                    "kind": bc.primitive_kind.value,
+                    "power_W": bc.power_W,
+                    "speed_mm_s": bc.speed_mm_s,
+                    "hatch_um": bc.hatch_um,
+                    "spot_um": bc.spot_um,
+                    "rotation_deg": bc.layer_rotation_deg,
+                    "scalar_J": best_entry.scalar_J,
+                    "fitness": list(best_entry.fitness.values),
+                }
+            self._publish(
+                EventType.GENERATION,
+                {
+                    "generation": g,
+                    "total_generations": gens,
+                    "population_size": stats.population_size,
+                    "front0_size": stats.front0_size,
+                    "archive_size": stats.archive_size,
+                    "best_scalar_J": stats.best_scalar_J,
+                    "median_scalar_J": stats.median_scalar_J,
+                    "hypervolume_2d": stats.hypervolume_2d,
+                    "crisis": stats.crisis,
+                    "best": best_chrom,
+                },
+            )
+
             if best_j + 1e-9 < last_best:
                 last_best = best_j
                 stagnation = 0
             else:
                 stagnation += 1
+        self._publish(
+            EventType.CAMPAIGN_END,
+            {
+                "generations_run": len(history),
+                "archive_size": len(self.archive),
+                "best_scalar_J": history[-1].best_scalar_J if history else None,
+            },
+        )
         return EvolutionLog(history=tuple(history), archive=self.archive)
