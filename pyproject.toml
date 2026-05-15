@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "laser_sim"
+version = "0.0.1"
+description = "Multi-fidelity evolutionary optimizer for LPBF laser scan patterns"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "x-pathfinder contributors" }]
+dependencies = [
+    "numpy>=1.26",
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "typer>=0.12",
+    "rich>=13.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+fastsim = ["jax", "jaxlib"]
+fastsim-cuda = ["cupy-cuda12x"]
+hf = ["jinja2", "ofpp"]
+viz = ["pyvista", "plotly"]
+api = ["fastapi", "uvicorn", "redis", "sqlalchemy", "psycopg[binary]", "aiosqlite", "alembic"]
+hardware = ["asyncua"]
+worker = ["paramiko"]
+dev = ["pytest>=8", "pytest-asyncio", "hypothesis", "ruff", "mypy"]
+
+[project.scripts]
+laser-sim = "laser_sim.cli:app"
+
+[tool.setuptools.packages.find]
+include = ["laser_sim*"]
+exclude = ["tests*"]
+
+[tool.pytest.ini_options]
+testpaths = ["laser_sim/tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
