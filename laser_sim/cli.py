@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import typer
 import yaml
 from rich.console import Console
@@ -358,6 +359,172 @@ def evolve(
                 rp = rasterize_pattern(pat, ds_mm=0.05)
                 saved = plot_field(ev_best.field, path=rp, out=best_field_png, title=title)
                 _console.print(f"[green]wrote[/green] {saved}")
+
+
+@app.command("validate")
+def validate(
+    sim_pattern_kind: str = typer.Option(
+        "zigzag",
+        "--sim-primitive",
+        help="primitive to use for the simulated reference (sim ↔ real comparison)",
+    ),
+    sim_power: float = typer.Option(200.0, "--sim-power"),
+    sim_speed: float = typer.Option(800.0, "--sim-speed"),
+    sim_hatch: float = typer.Option(100.0, "--sim-hatch"),
+    sim_spot: float = typer.Option(80.0, "--sim-spot"),
+    real_dir: Path = typer.Option(
+        ..., "--real", help="directory containing thermal*.npz, pyrometer*.csv, metadata.json"
+    ),
+    scenario: Path = typer.Option(None, "--scenario"),
+    grid_n: int = typer.Option(41, "--grid-n"),
+    stride: int = typer.Option(4, "--stride"),
+    report_png: Path = typer.Option(None, "--report-png", help="side-by-side sim/real heatmap"),
+) -> None:
+    """Compare a simulated pattern to a measurement set on disk.
+
+    Computes RMSE/IoU/cosine/KL between the sim T_max field and the
+    ingested real thermal frame after rigid-2D registration onto the sim grid.
+    The real measurement set must follow the canonical layout documented in
+    laser_sim/validation/ingest.py.
+    """
+    from laser_sim.fitness.evaluator import PatternEvaluator
+    from laser_sim.validation import (
+        FieldFeatures,
+        extract_field_features,
+        load_measurement_set,
+        score_thermal_frame,
+    )
+    from laser_sim.validation.register import resample_field_to_grid
+
+    sc = _load_scenario(scenario)
+    try:
+        kind = PrimitiveKind(sim_pattern_kind)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {sim_pattern_kind}")
+        raise typer.Exit(code=2)
+    spec = PrimitiveSpec(
+        kind=kind,
+        power_W=sim_power,
+        speed_mm_s=sim_speed,
+        hatch_um=sim_hatch,
+        spot_um=sim_spot,
+    )
+    pat = build_primitive(spec, sc.roi)
+    ev = PatternEvaluator(
+        sc.material, sc.machine, sc.roi, mode="field", grid_n=grid_n, stride=stride, spot_um=sim_spot
+    )
+    sim_eval = ev.evaluate(pat, hatch_mm=sim_hatch * 1e-3, spot_um=sim_spot)
+    if sim_eval.field is None:
+        _console.print("[red]sim eval missing field[/red]")
+        raise typer.Exit(code=1)
+
+    measurement_set = load_measurement_set(real_dir)
+    real_thermal = measurement_set.first_thermal()
+    if real_thermal is None:
+        _console.print(f"[red]no thermal*.npz in {real_dir}[/red]")
+        raise typer.Exit(code=2)
+    _console.print(
+        f"loaded {len(measurement_set.items)} measurements; experiment_id="
+        f"{measurement_set.experiment_id} sensor={real_thermal.sensor}"
+    )
+
+    # construct grid from real frame's pixel size + origin
+    H, W = real_thermal.frame_K.shape
+    real_x = real_thermal.origin_xy_mm[0] + np.arange(H) * real_thermal.pixel_um * 1e-3
+    real_y = real_thermal.origin_xy_mm[1] + np.arange(W) * real_thermal.pixel_um * 1e-3
+    # resample real onto sim grid
+    real_on_sim = resample_field_to_grid(
+        real_thermal.frame_K, real_x, real_y, sim_eval.field.grid_x_mm, sim_eval.field.grid_y_mm
+    )
+    # mask both fields where real has NaN (out-of-coverage)
+    valid = np.isfinite(real_on_sim)
+    if not valid.any():
+        _console.print("[red]no overlap between real and sim grids[/red]")
+        raise typer.Exit(code=2)
+    sim_masked = np.where(valid, sim_eval.field.t_max_K, np.nan)
+
+    score = score_thermal_frame(
+        sim_field_K=sim_masked,
+        real_field_K=real_on_sim,
+        liquidus_K=sc.material.liquidus_K,
+        boiling_K=sc.material.boiling_K,
+    )
+    table = Table(title=f"Sim ↔ real validation ({measurement_set.experiment_id})")
+    for col in ("metric", "value", "interpretation"):
+        table.add_column(col)
+    table.add_row("RMSE [K]", f"{score.rmse_K:.1f}", "lower is better")
+    table.add_row("IoU melt", f"{score.iou_melt:.3f}", "1.0 = perfect overlap")
+    table.add_row("IoU keyhole", f"{score.iou_keyhole:.3f}", "1.0 = perfect overlap")
+    table.add_row("cosine(hist)", f"{score.cosine_hist:.3f}", "1.0 = identical T distribution")
+    table.add_row("KL(sim||real)", f"{score.kl_hist:.4f}", "0.0 = identical T distribution")
+    table.add_row("composite", f"{score.composite:.4f}", "lower is better")
+    _console.print(table)
+
+    if report_png is not None:
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+        vmin = float(np.nanmin([sim_masked, real_on_sim]))
+        vmax = float(np.nanmax([sim_masked, real_on_sim]))
+        extent = (
+            float(sim_eval.field.grid_x_mm[0]),
+            float(sim_eval.field.grid_x_mm[-1]),
+            float(sim_eval.field.grid_y_mm[0]),
+            float(sim_eval.field.grid_y_mm[-1]),
+        )
+        for ax, data, label in zip(
+            axes,
+            (sim_masked.T, real_on_sim.T, (sim_masked - real_on_sim).T),
+            ("Simulation", f"Real ({real_thermal.sensor})", "Diff"),
+        ):
+            kw = dict(origin="lower", extent=extent, aspect="equal")
+            if label == "Diff":
+                im = ax.imshow(data, cmap="seismic", vmin=-(vmax - vmin) / 2, vmax=(vmax - vmin) / 2, **kw)
+            else:
+                im = ax.imshow(data, cmap="inferno", vmin=vmin, vmax=vmax, **kw)
+            fig.colorbar(im, ax=ax, label="[K]")
+            ax.set_title(label)
+            ax.set_xlabel("x [mm]")
+            ax.set_ylabel("y [mm]")
+        fig.suptitle(
+            f"Validation | RMSE={score.rmse_K:.0f}K IoU_melt={score.iou_melt:.2f} "
+            f"composite={score.composite:.3f}"
+        )
+        fig.tight_layout()
+        report_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(report_png, dpi=140)
+        plt.close(fig)
+        _console.print(f"[green]wrote[/green] {report_png}")
+
+
+@app.command("viz-pareto")
+def viz_pareto(
+    archive_json: Path = typer.Option(..., "--archive", help="archive JSON from `evolve --archive-json`"),
+    axes: str = typer.Option(
+        "2,4",
+        "--axes",
+        help="objective indices to plot, comma-separated; 0=u_temp,1=lof,2=keyhole,3=surface,4=t_cycle",
+    ),
+    matrix: bool = typer.Option(False, "--matrix", help="render full pairwise scatter matrix"),
+    out: Path = typer.Option(Path("pareto.png"), "--out", "-o"),
+) -> None:
+    """Render the Pareto archive (from `evolve --archive-json`) as a 2D scatter
+    or full pairwise matrix."""
+    from laser_sim.fitness.evaluator import OBJECTIVE_NAMES
+    from laser_sim.visualization.pareto_plot import plot_pareto_2d, plot_pareto_matrix
+
+    data = json.loads(Path(archive_json).read_text())
+    archive = data["archive"]
+    fits = [tuple(e["fitness"]) for e in archive]
+    sca = [float(e["scalar_J"]) for e in archive]
+    if matrix:
+        saved = plot_pareto_matrix(fits, sca, objective_names=tuple(OBJECTIVE_NAMES), out=out)
+    else:
+        i, j = (int(x) for x in axes.split(","))
+        saved = plot_pareto_2d(
+            fits, sca, axes=(i, j), objective_names=tuple(OBJECTIVE_NAMES), out=out,
+        )
+    _console.print(f"[green]wrote[/green] {saved} ({len(fits)} archive members)")
 
 
 @app.command("closed-loop")
