@@ -98,6 +98,57 @@ def _build_stripes(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]
     return tuple(segments)
 
 
+def _hilbert_d2xy(n: int, d: int) -> tuple[int, int]:
+    """Convert 1D Hilbert distance d in [0, n*n) to 2D (x, y) coords in [0, n).
+
+    Standard Karney/Wikipedia algorithm.
+    """
+    rx = ry = 0
+    x = y = 0
+    t = d
+    s = 1
+    while s < n:
+        rx = 1 & (t // 2)
+        ry = 1 & (t ^ rx)
+        if ry == 0:
+            if rx == 1:
+                x = s - 1 - x
+                y = s - 1 - y
+            x, y = y, x
+        x += s * rx
+        y += s * ry
+        t //= 4
+        s *= 2
+    return x, y
+
+
+def _build_hilbert(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
+    """Hilbert space-filling curve covering the ROI.
+
+    Order is inferred from hatch: pick the smallest order N such that
+    cell_size = ROI_extent / (2^N - 1) <= hatch.
+    """
+    hatch_mm = spec.hatch_um * 1e-3
+    extent = max(roi.width_mm, roi.height_mm)
+    if hatch_mm <= 0 or extent <= 0:
+        raise ValueError("ROI/hatch invalid")
+    order = max(int(spec.params.get("order", 0)), 0)
+    if order == 0:
+        order = max(1, math.ceil(math.log2(extent / hatch_mm + 1)))
+    order = min(order, 6)  # cap so we don't explode segment count
+    n = 1 << order
+    cx = 0.5 * (roi.x0_mm + roi.x1_mm)
+    cy = 0.5 * (roi.y0_mm + roi.y1_mm)
+    pts = np.array(
+        [_hilbert_d2xy(n, d) for d in range(n * n)], dtype=float
+    )
+    pts[:, 0] = roi.x0_mm + pts[:, 0] / max(n - 1, 1) * roi.width_mm
+    pts[:, 1] = roi.y0_mm + pts[:, 1] / max(n - 1, 1) * roi.height_mm
+    pts = _rotate(pts, spec.rotation_deg, (cx, cy))
+    wps = tuple(Waypoint(float(p[0]), float(p[1])) for p in pts)
+    return (Segment(waypoints=wps, power_W=spec.power_W, speed_mm_s=spec.speed_mm_s),)
+
+
 def _build_spiral(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
     """Inward Archimedean spiral covering ROI."""
     hatch_mm = spec.hatch_um * 1e-3
@@ -123,6 +174,7 @@ _BUILDERS: dict[PrimitiveKind, Callable[[PrimitiveSpec, GeometryROI], tuple[Segm
     PrimitiveKind.ZIGZAG: _build_zigzag,
     PrimitiveKind.STRIPES: _build_stripes,
     PrimitiveKind.SPIRAL: _build_spiral,
+    PrimitiveKind.HILBERT: _build_hilbert,
 }
 
 

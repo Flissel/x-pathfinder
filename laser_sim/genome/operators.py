@@ -54,6 +54,8 @@ def _kind_swap(c: Chromosome, machine: MachineConfig, sigma_mult: float, rng: ra
         extras["stripe_width_mm"] = rng.uniform(1.0, 5.0)
     elif new is PrimitiveKind.SPIRAL:
         extras["samples_per_turn"] = rng.choice([32, 48, 64, 96])
+    elif new is PrimitiveKind.HILBERT:
+        extras["order"] = rng.choice([3, 4, 5])
     return replace(c, primitive_kind=new, extras=extras).clamped(machine)
 
 

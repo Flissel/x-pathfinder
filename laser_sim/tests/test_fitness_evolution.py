@@ -149,7 +149,7 @@ def test_pareto_archive_evicts_dominated_on_new_winner() -> None:
     assert len(arc) == 1
 
 
-def test_evaluator_returns_finite_fitness(scenario: ScenarioConfig) -> None:
+def test_evaluator_segment_mode_returns_finite_fitness(scenario: ScenarioConfig) -> None:
     spec = PrimitiveSpec(
         kind=PrimitiveKind.ZIGZAG,
         power_W=200,
@@ -158,11 +158,52 @@ def test_evaluator_returns_finite_fitness(scenario: ScenarioConfig) -> None:
         spot_um=80,
     )
     pat = build_primitive(spec, scenario.roi)
-    ev = PatternEvaluator(scenario.material, scenario.machine, scenario.roi)
+    ev = PatternEvaluator(scenario.material, scenario.machine, scenario.roi, mode="segment")
     out = ev.evaluate(pat, hatch_mm=0.1)
     assert all(math.isfinite(v) for v in out.fitness.values)
     assert math.isfinite(out.scalar_J)
     assert "peak_T_K_mean" in out.metrics
+    assert out.field is None
+
+
+def test_evaluator_field_mode_uses_grid(scenario: ScenarioConfig) -> None:
+    spec = PrimitiveSpec(
+        kind=PrimitiveKind.ZIGZAG,
+        power_W=200,
+        speed_mm_s=800,
+        hatch_um=100,
+        spot_um=80,
+    )
+    pat = build_primitive(spec, scenario.roi)
+    ev = PatternEvaluator(
+        scenario.material, scenario.machine, scenario.roi, mode="field", grid_n=21, stride=4
+    )
+    out = ev.evaluate(pat, hatch_mm=0.1)
+    assert all(math.isfinite(v) for v in out.fitness.values)
+    assert out.field is not None
+    assert out.field.t_max_K.shape == (21, 21)
+    assert out.field.t_max_mean_K > scenario.machine.preheat_K
+    assert "coverage" in out.metrics
+
+
+def test_evaluator_field_mode_distinguishes_patterns(scenario: ScenarioConfig) -> None:
+    """Two patterns with the same (P, v, hatch) but different shape should
+    produce different field-mode fitness."""
+    spec_a = PrimitiveSpec(
+        kind=PrimitiveKind.ZIGZAG, power_W=200, speed_mm_s=800, hatch_um=100, spot_um=80
+    )
+    spec_b = PrimitiveSpec(
+        kind=PrimitiveKind.HILBERT, power_W=200, speed_mm_s=800, hatch_um=100, spot_um=80
+    )
+    pat_a = build_primitive(spec_a, scenario.roi)
+    pat_b = build_primitive(spec_b, scenario.roi)
+    ev = PatternEvaluator(
+        scenario.material, scenario.machine, scenario.roi, mode="field", grid_n=21, stride=4
+    )
+    out_a = ev.evaluate(pat_a)
+    out_b = ev.evaluate(pat_b)
+    # uniformity / coverage / cycle time will differ between zigzag and hilbert
+    assert out_a.fitness.values != out_b.fitness.values
 
 
 def test_random_chromosome_within_envelope(scenario: ScenarioConfig) -> None:

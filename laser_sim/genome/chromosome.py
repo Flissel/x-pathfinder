@@ -97,6 +97,8 @@ def random_chromosome(machine: MachineConfig, rng: random.Random) -> Chromosome:
         extras["stripe_width_mm"] = rng.uniform(1.0, 5.0)
     elif kind is PrimitiveKind.SPIRAL:
         extras["samples_per_turn"] = rng.choice([32, 48, 64, 96])
+    elif kind is PrimitiveKind.HILBERT:
+        extras["order"] = rng.choice([3, 4, 5])
     return Chromosome(
         primitive_kind=kind,
         power_W=rng.uniform(las.power_min_W, las.power_max_W),

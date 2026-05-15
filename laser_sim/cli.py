@@ -143,6 +143,62 @@ def viz_pattern(
         _console.print(f"[green]wrote[/green] {json_out}")
 
 
+@app.command("viz-field")
+def viz_field(
+    primitive: str = typer.Option("zigzag", "--primitive"),
+    power: float = typer.Option(200.0, "--power", help="W"),
+    speed: float = typer.Option(800.0, "--speed", help="mm/s"),
+    hatch: float = typer.Option(100.0, "--hatch", help="um"),
+    spot: float = typer.Option(80.0, "--spot", help="um"),
+    rotation: float = typer.Option(0.0, "--rotation", help="deg"),
+    grid_n: int = typer.Option(41, "--grid-n"),
+    stride: int = typer.Option(4, "--stride", help="path subsampling for the field eval"),
+    scenario: Path = typer.Option(None, "--scenario"),
+    out: Path = typer.Option(Path("field.png"), "--out", "-o"),
+) -> None:
+    """Render the T_max field for a primitive over the scenario ROI."""
+    from laser_sim.fitness.evaluator import PatternEvaluator
+    from laser_sim.patterns.rasterize import rasterize_pattern
+    from laser_sim.visualization.field_plot import plot_field
+
+    try:
+        kind = PrimitiveKind(primitive)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {primitive}")
+        raise typer.Exit(code=2)
+    sc = _load_scenario(scenario)
+    spec = PrimitiveSpec(
+        kind=kind,
+        power_W=power,
+        speed_mm_s=speed,
+        hatch_um=hatch,
+        spot_um=spot,
+        rotation_deg=rotation,
+    )
+    pat = build_primitive(spec, sc.roi)
+    ev = PatternEvaluator(
+        sc.material, sc.machine, sc.roi, mode="field", grid_n=grid_n, stride=stride, spot_um=spot
+    )
+    out_eval = ev.evaluate(pat, hatch_mm=hatch * 1e-3, spot_um=spot)
+    if out_eval.field is None:
+        _console.print("[red]no field result[/red]")
+        raise typer.Exit(code=1)
+    rp = rasterize_pattern(pat, ds_mm=0.05)
+    saved = plot_field(
+        out_eval.field,
+        path=rp,
+        out=out,
+        title=(
+            f"{kind.value} | P={power:.0f}W v={speed:.0f}mm/s "
+            f"hatch={hatch:.0f}um spot={spot:.0f}um"
+        ),
+    )
+    _console.print(
+        f"[green]wrote[/green] {saved} | coverage={out_eval.field.coverage_fraction*100:.1f}% "
+        f"keyhole={out_eval.field.keyhole_fraction*100:.1f}%"
+    )
+
+
 @app.command()
 def evolve(
     population: int = typer.Option(16, "--pop", help="population size"),
@@ -156,6 +212,12 @@ def evolve(
     best_pattern_png: Path = typer.Option(
         None, "--best-pattern-png", help="render the best (scalar) pattern"
     ),
+    best_field_png: Path = typer.Option(
+        None, "--best-field-png", help="render the best pattern's T_max field"
+    ),
+    mode: str = typer.Option("field", "--mode", help="evaluation mode: field|segment"),
+    grid_n: int = typer.Option(41, "--grid-n"),
+    stride: int = typer.Option(4, "--stride"),
 ) -> None:
     """Run the NSGA-II evolutionary loop with the Eagar-Tsai proxy.
 
@@ -182,7 +244,12 @@ def evolve(
         f"machine={sc.machine.machine_id} roi={sc.roi.roi_id} "
         f"pop={ea.population} gens={ea.generations} seed={ea.seed}"
     )
-    evaluator = PatternEvaluator(sc.material, sc.machine, sc.roi)
+    if mode not in ("field", "segment"):
+        _console.print(f"[red]unknown mode[/red]: {mode}")
+        raise typer.Exit(code=2)
+    evaluator = PatternEvaluator(
+        sc.material, sc.machine, sc.roi, mode=mode, grid_n=grid_n, stride=stride
+    )
 
     table = Table(title="Evolution log")
     for col in ("gen", "front0", "archive", "best_J", "median_J", "HV2D", "crisis"):
@@ -265,19 +332,32 @@ def evolve(
         archive_json.write_text(json.dumps(payload, indent=2))
         _console.print(f"[green]wrote[/green] {archive_json}")
 
-    if best_pattern_png is not None:
+    if best_pattern_png is not None or best_field_png is not None:
         pat = build_primitive(best.chromosome.to_primitive_spec(), sc.roi)
-        saved = plot_pattern(
-            pat,
-            out=best_pattern_png,
-            title=(
-                f"best | {best.chromosome.primitive_kind.value} | "
-                f"P={best.chromosome.power_W:.0f}W "
-                f"v={best.chromosome.speed_mm_s:.0f}mm/s "
-                f"hatch={best.chromosome.hatch_um:.0f}um"
-            ),
+        title = (
+            f"best | {best.chromosome.primitive_kind.value} | "
+            f"P={best.chromosome.power_W:.0f}W "
+            f"v={best.chromosome.speed_mm_s:.0f}mm/s "
+            f"hatch={best.chromosome.hatch_um:.0f}um"
         )
-        _console.print(f"[green]wrote[/green] {saved}")
+        if best_pattern_png is not None:
+            saved = plot_pattern(pat, out=best_pattern_png, title=title)
+            _console.print(f"[green]wrote[/green] {saved}")
+        if best_field_png is not None:
+            from laser_sim.patterns.rasterize import rasterize_pattern
+            from laser_sim.visualization.field_plot import plot_field
+
+            ev_best = evaluator.evaluate(
+                pat, hatch_mm=best.chromosome.hatch_um * 1e-3, spot_um=best.chromosome.spot_um
+            )
+            if ev_best.field is None:
+                _console.print(
+                    "[yellow]field render skipped[/yellow]: evaluator running in segment mode"
+                )
+            else:
+                rp = rasterize_pattern(pat, ds_mm=0.05)
+                saved = plot_field(ev_best.field, path=rp, out=best_field_png, title=title)
+                _console.print(f"[green]wrote[/green] {saved}")
 
 
 if __name__ == "__main__":

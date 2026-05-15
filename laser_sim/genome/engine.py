@@ -177,8 +177,11 @@ class GeneticEngine:
             best_j = min(scalars)
             median_j = sorted(scalars)[len(scalars) // 2]
             front0 = sum(1 for r in ranks_p if r == 0)
-            # 2D HV proxy on (u_temp_loss, p_lof) with ref (1.0, 1.0)
-            hv = self.archive.hypervolume_2d(axes=(0, 1), ref=(1.0, 1.0))
+            # 2D HV proxy on (p_keyhole, t_cycle_s) with ref (1.0, 5.0).
+            # Earlier we used (u_temp_loss, p_lof) but those saturate to zero
+            # on the field-mode evaluator within a few generations, so HV stuck
+            # at the maximum. (keyhole, t_cycle) keeps differentiating.
+            hv = self.archive.hypervolume_2d(axes=(2, 4), ref=(1.0, 5.0))
 
             stats = GenerationStats(
                 generation=g,

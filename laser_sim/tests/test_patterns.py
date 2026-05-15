@@ -126,7 +126,25 @@ def test_total_time_consistent_with_length() -> None:
 
 def test_unimplemented_primitive_raises(roi: GeometryROI) -> None:
     with pytest.raises(NotImplementedError):
-        build_primitive(_spec(PrimitiveKind.HILBERT), roi)
+        build_primitive(_spec(PrimitiveKind.ISLAND), roi)
+
+
+def test_hilbert_covers_roi_bbox(roi: GeometryROI) -> None:
+    pat = build_primitive(_spec(PrimitiveKind.HILBERT, hatch_um=300.0), roi)
+    assert len(pat.segments) == 1  # one continuous polyline
+    wps = pat.segments[0].waypoints
+    xs = np.array([w.x_mm for w in wps])
+    ys = np.array([w.y_mm for w in wps])
+    # the curve hits both extremes of the ROI
+    assert xs.min() == pytest.approx(roi.x0_mm, abs=1e-9)
+    assert xs.max() == pytest.approx(roi.x1_mm, abs=1e-9)
+    assert ys.min() == pytest.approx(roi.y0_mm, abs=1e-9)
+    assert ys.max() == pytest.approx(roi.y1_mm, abs=1e-9)
+    # the polyline length is roughly the area / hatch (Hilbert covers area
+    # uniformly), within a constant factor.
+    pts = np.column_stack([xs, ys])
+    length = float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+    assert length > roi.width_mm * roi.height_mm / 0.4  # generous lower bound
 
 
 def test_material_phase_order_validation() -> None:
