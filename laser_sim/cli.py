@@ -1,8 +1,8 @@
 """Command-line entry point.
 
 Subcommands grow with the phases. P0/P2 cover `info`, `scenario`, and
-`viz-pattern`. Later phases add `fast-sim`, `pack-bed`, `evolve`, `validate`,
-`closed-loop`.
+`viz-pattern`. P3 (proxy) + P4 add `evolve`. Later phases add `fast-sim`
+(real solver), `pack-bed`, `validate`, `closed-loop`.
 """
 
 from __future__ import annotations
@@ -141,6 +141,143 @@ def viz_pattern(
         json_out.parent.mkdir(parents=True, exist_ok=True)
         json_out.write_text(json.dumps(payload, indent=2))
         _console.print(f"[green]wrote[/green] {json_out}")
+
+
+@app.command()
+def evolve(
+    population: int = typer.Option(16, "--pop", help="population size"),
+    generations: int = typer.Option(5, "--gens", help="number of generations"),
+    seed: int = typer.Option(42, "--seed"),
+    elitism: int = typer.Option(2, "--elitism"),
+    crossover_rate: float = typer.Option(0.7, "--crossover"),
+    mutation_rate: float = typer.Option(0.3, "--mutation"),
+    scenario: Path = typer.Option(None, "--scenario", help="scenario YAML"),
+    archive_json: Path = typer.Option(None, "--archive-json", help="dump Pareto archive"),
+    best_pattern_png: Path = typer.Option(
+        None, "--best-pattern-png", help="render the best (scalar) pattern"
+    ),
+) -> None:
+    """Run the NSGA-II evolutionary loop with the Eagar-Tsai proxy.
+
+    This is the Phase 4 EA core wired to the Phase 3 analytical proxy. The
+    JAX/CuPy fast-sim and the HF (laserbeamFoam) runner will plug in behind
+    PatternEvaluator without changing this command.
+    """
+    from laser_sim.fitness.evaluator import OBJECTIVE_NAMES, PatternEvaluator
+    from laser_sim.genome.engine import GeneticEngine
+
+    sc = _load_scenario(scenario)
+    ea = sc.ea.model_copy(
+        update={
+            "population": population,
+            "generations": generations,
+            "seed": seed,
+            "elitism": elitism,
+            "crossover_rate": crossover_rate,
+            "mutation_rate": mutation_rate,
+        }
+    )
+    _console.print(
+        f"[bold]scenario[/bold] material={sc.material.material_id} "
+        f"machine={sc.machine.machine_id} roi={sc.roi.roi_id} "
+        f"pop={ea.population} gens={ea.generations} seed={ea.seed}"
+    )
+    evaluator = PatternEvaluator(sc.material, sc.machine, sc.roi)
+
+    table = Table(title="Evolution log")
+    for col in ("gen", "front0", "archive", "best_J", "median_J", "HV2D", "crisis"):
+        table.add_column(col)
+
+    rows: list[tuple] = []
+
+    def _on_gen(stats) -> None:
+        rows.append(
+            (
+                str(stats.generation),
+                str(stats.front0_size),
+                str(stats.archive_size),
+                f"{stats.best_scalar_J:.4f}",
+                f"{stats.median_scalar_J:.4f}",
+                f"{stats.hypervolume_2d:.4f}",
+                "*" if stats.crisis else "",
+            )
+        )
+
+    eng = GeneticEngine(
+        material=sc.material,
+        machine=sc.machine,
+        roi=sc.roi,
+        ea=ea,
+        evaluator=evaluator,
+        on_generation=_on_gen,
+    )
+    log = eng.run()
+    for r in rows:
+        table.add_row(*r)
+    _console.print(table)
+
+    best = log.best()
+    if best is None:
+        _console.print("[red]no solutions in archive[/red]")
+        raise typer.Exit(code=1)
+    _console.print(
+        "[bold green]Pareto archive[/bold green] "
+        f"size={len(log.archive)} best_J={best.scalar_J:.4f}"
+    )
+    _console.print("best chromosome:")
+    _console.print_json(
+        json.dumps(
+            {
+                "kind": best.chromosome.primitive_kind.value,
+                "power_W": round(best.chromosome.power_W, 3),
+                "speed_mm_s": round(best.chromosome.speed_mm_s, 3),
+                "hatch_um": round(best.chromosome.hatch_um, 3),
+                "spot_um": round(best.chromosome.spot_um, 3),
+                "rotation_deg": best.chromosome.layer_rotation_deg,
+                "extras": best.chromosome.extras,
+            }
+        )
+    )
+
+    if archive_json is not None:
+        payload = {
+            "scenario_id": sc.scenario_id,
+            "objective_version": sc.objective_version,
+            "objectives": list(OBJECTIVE_NAMES),
+            "archive": [
+                {
+                    "fitness": list(e.fitness.values),
+                    "scalar_J": e.scalar_J,
+                    "chromosome": {
+                        "kind": e.chromosome.primitive_kind.value,
+                        "power_W": e.chromosome.power_W,
+                        "speed_mm_s": e.chromosome.speed_mm_s,
+                        "hatch_um": e.chromosome.hatch_um,
+                        "spot_um": e.chromosome.spot_um,
+                        "rotation_deg": e.chromosome.layer_rotation_deg,
+                        "extras": e.chromosome.extras,
+                    },
+                }
+                for e in log.archive.entries
+            ],
+        }
+        archive_json.parent.mkdir(parents=True, exist_ok=True)
+        archive_json.write_text(json.dumps(payload, indent=2))
+        _console.print(f"[green]wrote[/green] {archive_json}")
+
+    if best_pattern_png is not None:
+        pat = build_primitive(best.chromosome.to_primitive_spec(), sc.roi)
+        saved = plot_pattern(
+            pat,
+            out=best_pattern_png,
+            title=(
+                f"best | {best.chromosome.primitive_kind.value} | "
+                f"P={best.chromosome.power_W:.0f}W "
+                f"v={best.chromosome.speed_mm_s:.0f}mm/s "
+                f"hatch={best.chromosome.hatch_um:.0f}um"
+            ),
+        )
+        _console.print(f"[green]wrote[/green] {saved}")
 
 
 if __name__ == "__main__":
