@@ -219,6 +219,17 @@ def evolve(
     mode: str = typer.Option("field", "--mode", help="evaluation mode: field|segment"),
     grid_n: int = typer.Option(41, "--grid-n"),
     stride: int = typer.Option(4, "--stride"),
+    persist_db: Path = typer.Option(
+        None, "--persist", help="SQLite path to write campaign + runs + archive"
+    ),
+    resume_campaign: str = typer.Option(
+        None,
+        "--resume",
+        help="campaign name to resume; reads cached evaluations from --persist DB",
+    ),
+    campaign_name: str = typer.Option(
+        None, "--name", help="campaign name when persisting; auto-generated if omitted"
+    ),
 ) -> None:
     """Run the NSGA-II evolutionary loop with the Eagar-Tsai proxy.
 
@@ -252,6 +263,40 @@ def evolve(
         sc.material, sc.machine, sc.roi, mode=mode, grid_n=grid_n, stride=stride
     )
 
+    accumulator = None
+    db_handle = None
+    if persist_db is not None or resume_campaign is not None:
+        from laser_sim.storage import KnowledgeAccumulator, open_database
+        import time as _time
+
+        db_path = persist_db or Path("laser_sim_campaigns.db")
+        db_handle = open_database(db_path)
+        scenario_dict = json.loads(sc.model_dump_json())
+        scenario_id = db_handle.upsert_scenario(scenario_dict)
+        if resume_campaign:
+            row = db_handle.get_campaign_by_name(resume_campaign)
+            if row is None:
+                _console.print(f"[red]campaign not found: {resume_campaign}[/red]")
+                raise typer.Exit(code=2)
+            cid = row.campaign_id
+            _console.print(
+                f"[bold]resuming[/bold] campaign {resume_campaign!r} "
+                f"(id={cid[:8]}, last_gen={row.last_generation})"
+            )
+        else:
+            cname = campaign_name or f"campaign_{int(_time.time())}"
+            cid = db_handle.create_campaign(name=cname, scenario_id=scenario_id)
+            _console.print(f"[bold]new campaign[/bold] {cname!r} (id={cid[:8]})")
+        accumulator = KnowledgeAccumulator(db=db_handle, campaign_id=cid)
+        if len(accumulator) > 0:
+            _console.print(
+                f"[green]hydrated[/green] {len(accumulator)} prior evaluations from disk"
+            )
+
+    def _commit(g: int, entries: list) -> None:
+        if accumulator is not None:
+            accumulator.commit_archive(entries, generation=g)
+
     table = Table(title="Evolution log")
     for col in ("gen", "front0", "archive", "best_J", "median_J", "HV2D", "crisis"):
         table.add_column(col)
@@ -278,8 +323,12 @@ def evolve(
         ea=ea,
         evaluator=evaluator,
         on_generation=_on_gen,
+        cache=accumulator,
+        on_commit=_commit,
     )
     log = eng.run()
+    if db_handle is not None:
+        db_handle.close()
     for r in rows:
         table.add_row(*r)
     _console.print(table)
@@ -495,6 +544,119 @@ def validate(
         fig.savefig(report_png, dpi=140)
         plt.close(fig)
         _console.print(f"[green]wrote[/green] {report_png}")
+
+
+@app.command("viz3d")
+def viz3d(
+    primitive: str = typer.Option("zigzag", "--primitive"),
+    power: float = typer.Option(200.0, "--power"),
+    speed: float = typer.Option(800.0, "--speed"),
+    hatch: float = typer.Option(100.0, "--hatch"),
+    spot: float = typer.Option(80.0, "--spot"),
+    rotation: float = typer.Option(0.0, "--rotation"),
+    scenario: Path = typer.Option(None, "--scenario"),
+    grid_n: int = typer.Option(32, "--grid-n"),
+    n_frames: int = typer.Option(24, "--n-frames"),
+    stride: int = typer.Option(6, "--stride"),
+    out_json: Path = typer.Option(Path("scene.json"), "--out", "-o"),
+) -> None:
+    """Export a scan-pattern + time-stepped T_max field as a JSON scene that
+    the Three.js viewer (laser_sim/visualization/three_js_app/index.html)
+    consumes. Run `python -m laser_sim serve --scene scene.json` to view it
+    at http://127.0.0.1:8765/viewer."""
+    from laser_sim.visualization.scene_export import export_scene
+
+    sc = _load_scenario(scenario)
+    try:
+        kind = PrimitiveKind(primitive)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {primitive}")
+        raise typer.Exit(code=2)
+    spec = PrimitiveSpec(
+        kind=kind, power_W=power, speed_mm_s=speed, hatch_um=hatch, spot_um=spot, rotation_deg=rotation
+    )
+    pat = build_primitive(spec, sc.roi)
+    saved = export_scene(
+        pat,
+        sc,
+        out_path=out_json,
+        spot_um=spot,
+        grid_n=grid_n,
+        n_frames=n_frames,
+        stride=stride,
+    )
+    _console.print(
+        f"[green]wrote[/green] {saved} ({n_frames} frames, {grid_n}^2 grid, "
+        f"{pat.total_time_s()*1e3:.0f}ms scan)"
+    )
+    _console.print(
+        "next: [bold]python -m laser_sim serve --scene "
+        f"{saved}[/bold] then open http://127.0.0.1:8765/viewer"
+    )
+
+
+@app.command("serve")
+def serve_cmd(
+    db_path: Path = typer.Option(
+        Path("laser_sim_campaigns.db"), "--db", help="campaign database"
+    ),
+    scene: Path = typer.Option(None, "--scene", help="3D scene JSON to serve at /scene.json"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+) -> None:
+    """Run the Flask dashboard + 3D viewer locally."""
+    from laser_sim.visualization.web_app import serve as _serve
+
+    _console.print(f"[bold]serving[/bold] http://{host}:{port}/  (Ctrl+C to stop)")
+    _console.print(f"  db:    {db_path}")
+    _console.print(f"  scene: {scene}")
+    _serve(db_path=db_path, scene_json=scene, host=host, port=port, debug=False)
+
+
+@app.command("history")
+def history(
+    db_path: Path = typer.Option(Path("laser_sim_campaigns.db"), "--db"),
+    campaign: str = typer.Option(None, "--campaign", help="show one campaign's archive"),
+    top: int = typer.Option(10, "--top"),
+) -> None:
+    """List campaigns or dump the Pareto archive of a given campaign."""
+    from laser_sim.storage import open_database
+
+    db = open_database(db_path)
+    try:
+        if campaign is None:
+            campaigns = db.list_campaigns()
+            table = Table(title=f"Campaigns in {db_path}")
+            for c in ("name", "id", "scenario_id", "gens", "updated_at"):
+                table.add_column(c)
+            for r in campaigns:
+                table.add_row(
+                    r.name,
+                    r.campaign_id[:8],
+                    r.scenario_id[:8],
+                    str(r.last_generation),
+                    r.updated_at[:19],
+                )
+            _console.print(table)
+            return
+        row = db.get_campaign_by_name(campaign)
+        if row is None:
+            _console.print(f"[red]campaign not found[/red]: {campaign}")
+            raise typer.Exit(code=2)
+        archive = db.list_archive(row.campaign_id)
+        _console.print(f"campaign [bold]{campaign}[/bold] archive size={len(archive)}")
+        table = Table(title=f"Top {top} by scalar_J")
+        for c in ("scalar_J", "fitness", "gen"):
+            table.add_column(c)
+        for a in archive[:top]:
+            table.add_row(
+                f"{a.scalar_J:.4f}" if a.scalar_J is not None else "-",
+                a.fitness_json,
+                str(a.generation) if a.generation is not None else "-",
+            )
+        _console.print(table)
+    finally:
+        db.close()
 
 
 @app.command("calibrate")

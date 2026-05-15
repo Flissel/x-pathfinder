@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol
 
 from laser_sim.config.schema import EAConfig, GeometryROI, MachineConfig, MaterialConfig
 from laser_sim.fitness.evaluator import FitnessVector, PatternEvaluator
@@ -28,6 +28,12 @@ from laser_sim.genome.operators import (
     tournament_select,
 )
 from laser_sim.patterns.primitives import build_primitive
+
+
+class EvalCache(Protocol):
+    def __contains__(self, key: str) -> bool: ...
+    def get(self, key: str) -> ArchiveEntry | None: ...
+    def put(self, key: str, entry: ArchiveEntry, **kw: Any) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ class GeneticEngine:
         ea: EAConfig,
         evaluator: PatternEvaluator | None = None,
         on_generation: Callable[[GenerationStats], None] | None = None,
+        cache: EvalCache | dict[str, ArchiveEntry] | None = None,
+        on_commit: Callable[[int, list[ArchiveEntry]], None] | None = None,
     ) -> None:
         self.material = material
         self.machine = machine
@@ -81,11 +89,26 @@ class GeneticEngine:
         self.on_generation = on_generation
         self.rng = random.Random(ea.seed)
         self.archive = ParetoArchive(max_size=256)
-        self._cache: dict[str, ArchiveEntry] = {}
+        self._cache = cache if cache is not None else {}
+        # if the cache is pre-populated (e.g. KnowledgeAccumulator hydrated
+        # from disk), seed the archive with its entries
+        self._seed_archive_from_cache()
+        self.on_commit = on_commit
+        self._current_generation = 0
+
+    def _seed_archive_from_cache(self) -> None:
+        snapshot = getattr(self._cache, "memory_snapshot", None)
+        if snapshot is None:
+            return
+        for e in snapshot():
+            self.archive.add(e)
 
     def _evaluate(self, c: Chromosome) -> ArchiveEntry:
         key = c.hash_id()
-        hit = self._cache.get(key)
+        if isinstance(self._cache, dict):
+            hit = self._cache.get(key)
+        else:
+            hit = self._cache.get(key)
         if hit is not None:
             return hit
         pattern = build_primitive(c.to_primitive_spec(), self.roi)
@@ -93,7 +116,10 @@ class GeneticEngine:
             pattern, hatch_mm=c.hatch_um * 1e-3, spot_um=c.spot_um
         )
         entry = ArchiveEntry(chromosome=c, fitness=ev.fitness, scalar_J=ev.scalar_J)
-        self._cache[key] = entry
+        if isinstance(self._cache, dict):
+            self._cache[key] = entry
+        else:
+            self._cache.put(key, entry, generation=self._current_generation, metrics=dict(ev.metrics))
         return entry
 
     def _initial_population(self) -> list[ArchiveEntry]:
@@ -153,6 +179,7 @@ class GeneticEngine:
         stagnation = 0
 
         for g in range(gens):
+            self._current_generation = g
             ranks, crowding = self._rank_and_crowd(population)
             crisis = stagnation >= self.ea.crisis_after_stagnation
 
@@ -196,6 +223,8 @@ class GeneticEngine:
             history.append(stats)
             if self.on_generation is not None:
                 self.on_generation(stats)
+            if self.on_commit is not None:
+                self.on_commit(g, self.archive.entries)
 
             if best_j + 1e-9 < last_best:
                 last_best = best_j
