@@ -98,13 +98,24 @@ def eagar_tsai_melt_pool(
     layer_mm: float,
     spot_um: float = 80.0,
     grid_n: int = 41,
-    grid_extent_mm: float = 1.0,
+    grid_extent_mm: float | None = None,
 ) -> MeltPoolEstimate:
     """Sample the Rosenthal field on a small grid and extract melt-pool features.
 
     grid_extent_mm spans the moving frame in the +-x / +-y / 0..depth directions.
-    grid_n controls resolution per axis (default 41 -> ~25 um spacing for 1 mm).
+    grid_n controls resolution per axis (default 41).
+
+    If grid_extent_mm is None (default) the extent is auto-scaled to the
+    characteristic thermal length alpha/v so the melt pool resolves cleanly
+    at any (P, v): high-speed scans (narrow pool) get a tight grid, slow
+    scans (wide pool) get a coarse grid.
     """
+    if grid_extent_mm is None:
+        alpha = _alpha_solid(mat)  # m^2/s
+        v_m_s = max(speed_mm_s * 1e-3, 1e-6)
+        # 100 thermal-diffusion lengths gives ~3 melt-pool widths of headroom
+        L_char_m = 100.0 * alpha / v_m_s
+        grid_extent_mm = float(np.clip(L_char_m * 1e3, 0.15, 2.0))
     half = grid_extent_mm
     xi = np.linspace(-half, half, grid_n)
     y = np.linspace(-half, half, grid_n)
