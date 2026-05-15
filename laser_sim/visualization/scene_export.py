@@ -45,7 +45,7 @@ from laser_sim.patterns.rasterize import rasterize_pattern
 from laser_sim.physics.fast_sim.eagar_tsai import rosenthal_field
 
 
-def _time_stepped_field(
+def _time_stepped_field_max(
     path: RasterizedPath,
     scenario: ScenarioConfig,
     spot_um: float,
@@ -54,11 +54,7 @@ def _time_stepped_field(
     n_frames: int,
     stride: int,
 ) -> list[dict[str, Any]]:
-    """Compute T_max field at each of n_frames time checkpoints.
-
-    Each checkpoint includes contributions only from path samples with
-    t_k <= t_checkpoint, so the field grows realistically as the laser scans.
-    """
+    """Cumulative max of steady-state Rosenthal contributions per checkpoint."""
     if path.n_samples() < 2:
         return []
     t0, t1 = float(path.t_s.min()), float(path.t_s.max())
@@ -98,12 +94,61 @@ def _time_stepped_field(
                 spot_um=spot_um,
             )
             np.maximum(T_max, T_k, out=T_max)
-        frames.append(
-            {
-                "t_s": float(tj),
-                "t_max_K": T_max.round(1).tolist(),
-            }
-        )
+        frames.append({"t_s": float(tj), "t_max_K": T_max.round(1).tolist()})
+    return frames
+
+
+def _time_stepped_field_superposition(
+    path: RasterizedPath,
+    scenario: ScenarioConfig,
+    spot_um: float,
+    grid_x: np.ndarray,
+    grid_y: np.ndarray,
+    n_frames: int,
+    stride: int,
+) -> list[dict[str, Any]]:
+    """3D Green's function summation per checkpoint — true heat accumulation."""
+    if path.n_samples() < 2:
+        return []
+    keep = path.laser_on & (path.power_W > 0)
+    px = np.asarray(path.x_mm)[keep][::max(stride, 1)]
+    py = np.asarray(path.y_mm)[keep][::max(stride, 1)]
+    pP = np.asarray(path.power_W)[keep][::max(stride, 1)]
+    pt = np.asarray(path.t_s)[keep][::max(stride, 1)]
+    if pt.size < 2:
+        return []
+    dt = np.diff(pt, prepend=pt[0])
+    pos_dt = dt[dt > 0]
+    fill = float(np.median(pos_dt)) if pos_dt.size else 1e-5
+    dt = np.where(dt > 0, dt, fill)
+
+    mat = scenario.material
+    eta = mat.absorptivity
+    rho = mat.rho_solid
+    cp = mat.cp_solid
+    alpha = mat.k_solid / (rho * cp)
+    r_min = max(spot_um * 1e-6 * 0.5, 5e-6)
+    r_min2 = r_min ** 2
+
+    Xg, Yg = np.meshgrid(grid_x, grid_y, indexing="ij")
+    dx2 = (Xg[:, :, None] - px[None, None, :]) ** 2 * 1e-6
+    dy2 = (Yg[:, :, None] - py[None, None, :]) ** 2 * 1e-6
+    r2 = dx2 + dy2 + r_min2  # (nx, ny, Np)
+    weights = (eta * pP * dt) / (rho * cp)  # (Np,)
+
+    t0, t1 = float(pt[0]), float(pt[-1])
+    tail = max((t1 - t0) * 0.15, 1e-3)
+    checkpoints = np.linspace(t0 + 1e-5, t1 + tail, n_frames)
+    preheat = float(scenario.machine.preheat_K)
+    frames: list[dict[str, Any]] = []
+    for tj in checkpoints:
+        tau = tj - pt
+        valid = tau > 1e-9
+        tau_safe = np.where(valid, tau, 1.0)
+        denom = (4.0 * np.pi * alpha * tau_safe) ** 1.5
+        kernel = np.where(valid, np.exp(-r2 / (4.0 * alpha * tau_safe)) / denom, 0.0)
+        T = preheat + (weights * kernel).sum(axis=2)
+        frames.append({"t_s": float(tj), "t_max_K": T.round(1).tolist()})
     return frames
 
 
@@ -117,18 +162,26 @@ def export_scene(
     n_frames: int = 24,
     stride: int = 6,
     rasterize_ds_mm: float = 0.05,
+    transient_mode: str = "superposition",
 ) -> Path:
     """Build and dump the scene JSON.
 
-    Defaults aim for a smooth animation (24 frames) on a moderate grid (32^2)
-    with reasonable runtime: ~24 frames * 32^2 cells * 500 path samples ~ 12M ops.
+    transient_mode:
+      "max"           cumulative per-source-max of steady-state Rosenthal
+      "superposition" true time-domain 3D Green's function (physical heat
+                      accumulation; recommended for visualization)
     """
     rp = rasterize_pattern(pattern, ds_mm=rasterize_ds_mm)
     grid_x = np.linspace(scenario.roi.x0_mm, scenario.roi.x1_mm, grid_n)
     grid_y = np.linspace(scenario.roi.y0_mm, scenario.roi.y1_mm, grid_n)
-    frames = _time_stepped_field(
-        rp, scenario, spot_um, grid_x, grid_y, n_frames=n_frames, stride=stride
-    )
+    if transient_mode == "superposition":
+        frames = _time_stepped_field_superposition(
+            rp, scenario, spot_um, grid_x, grid_y, n_frames=n_frames, stride=stride
+        )
+    else:
+        frames = _time_stepped_field_max(
+            rp, scenario, spot_um, grid_x, grid_y, n_frames=n_frames, stride=stride
+        )
     payload = {
         "scenario_id": str(scenario.scenario_id),
         "objective_version": scenario.objective_version,
@@ -158,6 +211,7 @@ def export_scene(
             "grid_n": grid_n,
             "stride": stride,
             "n_path_samples": rp.n_samples(),
+            "transient_mode": transient_mode,
         },
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)

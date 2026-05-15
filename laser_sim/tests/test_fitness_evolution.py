@@ -298,6 +298,103 @@ def test_engine_cache_skips_duplicate_evaluations(scenario: ScenarioConfig) -> N
     assert e1 is e2  # same cached object
 
 
+def test_transient_superposition_accumulates_heat(scenario: ScenarioConfig) -> None:
+    """At a point BETWEEN two close tracks, the two-track field should be hotter
+    than the single-track field at the same point. Validates that the 3D Green's
+    function model captures inter-track accumulation (the per-source-max
+    approximation would give nearly the same value)."""
+    import numpy as np
+
+    from laser_sim.patterns.base import ScanPattern, Segment, Waypoint
+    from laser_sim.patterns.rasterize import rasterize_pattern
+    from laser_sim.physics.fast_sim.transient import t_max_field_superposition
+
+    # single track exactly at y=0
+    iso = ScanPattern(
+        segments=(
+            Segment(
+                waypoints=(Waypoint(-2.0, 0.05), Waypoint(2.0, 0.05)),
+                power_W=200, speed_mm_s=800,
+            ),
+        )
+    )
+    # two close tracks straddling y=0 with 100um gap
+    two = ScanPattern(
+        segments=(
+            Segment(
+                waypoints=(Waypoint(-2.0, -0.05), Waypoint(2.0, -0.05)),
+                power_W=200, speed_mm_s=800,
+            ),
+            Segment(
+                waypoints=(Waypoint(2.0, 0.05), Waypoint(-2.0, 0.05)),
+                power_W=200, speed_mm_s=800,
+            ),
+        )
+    )
+    iso_rp = rasterize_pattern(iso, ds_mm=0.05)
+    two_rp = rasterize_pattern(two, ds_mm=0.05)
+    f_iso = t_max_field_superposition(
+        iso_rp, scenario.roi, scenario.material, scenario.machine,
+        spot_um=80.0, nx=41, ny=41, stride=6,
+    )
+    f_two = t_max_field_superposition(
+        two_rp, scenario.roi, scenario.material, scenario.machine,
+        spot_um=80.0, nx=41, ny=41, stride=6,
+    )
+    # find the grid cell closest to (0, 0) — the gap between the two-track pair
+    iy = int(np.argmin(np.abs(f_two.grid_y_mm)))
+    # average over a thin band along x at y=0 to smooth out grid noise
+    band_two = f_two.t_max_K[:, iy].mean()
+    band_iso = f_iso.t_max_K[:, iy].mean()
+    assert band_two > band_iso * 1.05  # at least 5% hotter from accumulation
+
+
+def test_transient_superposition_vs_max_differs(scenario: ScenarioConfig) -> None:
+    """Superposition and per-source-max should produce different fields for
+    a real scan pattern. Either could be 'larger' depending on geometry but
+    they must not coincide."""
+    import numpy as np
+
+    from laser_sim.patterns.rasterize import rasterize_pattern
+    from laser_sim.physics.fast_sim.transient import (
+        t_max_field,
+        t_max_field_superposition,
+    )
+
+    spec = PrimitiveSpec(
+        kind=PrimitiveKind.ZIGZAG, power_W=200, speed_mm_s=800, hatch_um=80, spot_um=80
+    )
+    pat = build_primitive(spec, scenario.roi)
+    rp = rasterize_pattern(pat, ds_mm=0.05)
+    f_max = t_max_field(
+        rp, scenario.roi, scenario.material, scenario.machine,
+        spot_um=80.0, nx=21, ny=21, stride=8,
+    )
+    f_sup = t_max_field_superposition(
+        rp, scenario.roi, scenario.material, scenario.machine,
+        spot_um=80.0, nx=21, ny=21, stride=8,
+    )
+    assert not np.allclose(f_max.t_max_K, f_sup.t_max_K)
+
+
+def test_evaluator_transient_mode_propagates(scenario: ScenarioConfig) -> None:
+    spec = PrimitiveSpec(
+        kind=PrimitiveKind.ZIGZAG, power_W=200, speed_mm_s=800, hatch_um=80, spot_um=80
+    )
+    pat = build_primitive(spec, scenario.roi)
+    ev_max = PatternEvaluator(
+        scenario.material, scenario.machine, scenario.roi,
+        mode="field", grid_n=21, stride=8, transient_mode="max",
+    )
+    ev_sup = PatternEvaluator(
+        scenario.material, scenario.machine, scenario.roi,
+        mode="field", grid_n=21, stride=8, transient_mode="superposition",
+    )
+    out_max = ev_max.evaluate(pat)
+    out_sup = ev_sup.evaluate(pat)
+    assert out_max.fitness.values != out_sup.fitness.values
+
+
 def test_scalarize_weights_validate() -> None:
     f = FitnessVector(values=(0.1, 0.2, 0.3, 0.4, 0.5))
     assert math.isclose(

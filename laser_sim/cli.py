@@ -219,6 +219,11 @@ def evolve(
     mode: str = typer.Option("field", "--mode", help="evaluation mode: field|segment"),
     grid_n: int = typer.Option(41, "--grid-n"),
     stride: int = typer.Option(4, "--stride"),
+    transient_mode: str = typer.Option(
+        "max",
+        "--transient",
+        help="max (fast, default for EA) | superposition (true heat accumulation, ~5x slower)",
+    ),
     persist_db: Path = typer.Option(
         None, "--persist", help="SQLite path to write campaign + runs + archive"
     ),
@@ -260,7 +265,13 @@ def evolve(
         _console.print(f"[red]unknown mode[/red]: {mode}")
         raise typer.Exit(code=2)
     evaluator = PatternEvaluator(
-        sc.material, sc.machine, sc.roi, mode=mode, grid_n=grid_n, stride=stride
+        sc.material,
+        sc.machine,
+        sc.roi,
+        mode=mode,
+        grid_n=grid_n,
+        stride=stride,
+        transient_mode=transient_mode,
     )
 
     accumulator = None
@@ -558,6 +569,11 @@ def viz3d(
     grid_n: int = typer.Option(32, "--grid-n"),
     n_frames: int = typer.Option(24, "--n-frames"),
     stride: int = typer.Option(6, "--stride"),
+    transient_mode: str = typer.Option(
+        "superposition",
+        "--transient",
+        help="max | superposition (default: physical 3D Green's function)",
+    ),
     out_json: Path = typer.Option(Path("scene.json"), "--out", "-o"),
 ) -> None:
     """Export a scan-pattern + time-stepped T_max field as a JSON scene that
@@ -584,10 +600,11 @@ def viz3d(
         grid_n=grid_n,
         n_frames=n_frames,
         stride=stride,
+        transient_mode=transient_mode,
     )
     _console.print(
         f"[green]wrote[/green] {saved} ({n_frames} frames, {grid_n}^2 grid, "
-        f"{pat.total_time_s()*1e3:.0f}ms scan)"
+        f"{pat.total_time_s()*1e3:.0f}ms scan, transient={transient_mode})"
     )
     _console.print(
         "next: [bold]python -m laser_sim serve --scene "

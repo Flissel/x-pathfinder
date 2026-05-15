@@ -27,7 +27,11 @@ from laser_sim.config.schema import GeometryROI, MachineConfig, MaterialConfig
 from laser_sim.patterns.base import ScanPattern
 from laser_sim.patterns.rasterize import rasterize_pattern
 from laser_sim.physics.fast_sim.eagar_tsai import MeltPoolEstimate, eagar_tsai_melt_pool
-from laser_sim.physics.fast_sim.transient import FieldResult, t_max_field
+from laser_sim.physics.fast_sim.transient import (
+    FieldResult,
+    t_max_field,
+    t_max_field_superposition,
+)
 
 OBJECTIVE_NAMES: tuple[str, ...] = (
     "u_temp_loss",
@@ -164,6 +168,7 @@ def _evaluate_field_mode(
     spot_um: float,
     grid_n: int,
     stride: int,
+    transient_mode: str = "max",
 ) -> PatternEvaluation:
     rp = rasterize_pattern(pattern, ds_mm=0.05)
     if rp.n_samples() < 2:
@@ -174,16 +179,28 @@ def _evaluate_field_mode(
             scalar_J=scalarize(f),
         )
 
-    field = t_max_field(
-        rp,
-        roi,
-        material=material,
-        machine=machine,
-        spot_um=spot_um,
-        nx=grid_n,
-        ny=grid_n,
-        stride=stride,
-    )
+    if transient_mode == "superposition":
+        field = t_max_field_superposition(
+            rp,
+            roi,
+            material=material,
+            machine=machine,
+            spot_um=spot_um,
+            nx=grid_n,
+            ny=grid_n,
+            stride=stride,
+        )
+    else:
+        field = t_max_field(
+            rp,
+            roi,
+            material=material,
+            machine=machine,
+            spot_um=spot_um,
+            nx=grid_n,
+            ny=grid_n,
+            stride=stride,
+        )
 
     u_temp_loss = float(field.t_max_std_K / max(field.t_max_mean_K, 1e-9))
     u_temp_loss = max(0.0, min(1.0, u_temp_loss))
@@ -237,6 +254,7 @@ class PatternEvaluator:
         mode: Literal["field", "segment"] = "field",
         grid_n: int = 41,
         stride: int = 4,
+        transient_mode: Literal["max", "superposition"] = "max",
     ) -> None:
         self.material = material
         self.machine = machine
@@ -246,6 +264,7 @@ class PatternEvaluator:
         self.mode = mode
         self.grid_n = grid_n
         self.stride = stride
+        self.transient_mode = transient_mode
 
     def evaluate(
         self,
@@ -258,5 +277,12 @@ class PatternEvaluator:
         if self.mode == "segment":
             return _evaluate_segment_mode(pattern, self.material, self.machine, h, s)
         return _evaluate_field_mode(
-            pattern, self.roi, self.material, self.machine, s, self.grid_n, self.stride
+            pattern,
+            self.roi,
+            self.material,
+            self.machine,
+            s,
+            self.grid_n,
+            self.stride,
+            transient_mode=self.transient_mode,
         )

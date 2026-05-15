@@ -46,22 +46,39 @@ def test_scene_export_round_trip(tmp_path: Path, scenario: ScenarioConfig) -> No
 
 
 def test_scene_export_field_grows_over_time(tmp_path: Path, scenario: ScenarioConfig) -> None:
-    """The cumulative T_max field should never lose heat: each frame's mean
-    should be at least the previous frame's mean (heat only accumulates)."""
+    """In `max` transient mode the cumulative T_max field is monotone
+    non-decreasing per cell. Superposition allows diffusion-driven cooling
+    so monotonicity there does NOT hold; we test it on `max` mode only."""
     spec = PrimitiveSpec(
         kind=PrimitiveKind.ZIGZAG, power_W=200, speed_mm_s=800, hatch_um=100, spot_um=80
     )
     pat = build_primitive(spec, scenario.roi)
     out = tmp_path / "scene.json"
-    export_scene(pat, scenario, out, grid_n=16, n_frames=4, stride=4)
+    export_scene(pat, scenario, out, grid_n=16, n_frames=4, stride=4, transient_mode="max")
     data = json.loads(out.read_text())
     means = []
     for f in data["field"]["frames"]:
         flat = [v for row in f["t_max_K"] for v in row]
         means.append(sum(flat) / len(flat))
-    # monotone non-decreasing (allow rounding noise)
     for a, b in zip(means, means[1:]):
         assert b >= a - 1.0
+
+
+def test_scene_export_superposition_runs(tmp_path: Path, scenario: ScenarioConfig) -> None:
+    """Superposition mode produces a valid scene with the requested frame count."""
+    spec = PrimitiveSpec(
+        kind=PrimitiveKind.ZIGZAG, power_W=200, speed_mm_s=800, hatch_um=80, spot_um=80
+    )
+    pat = build_primitive(spec, scenario.roi)
+    out = tmp_path / "scene_sup.json"
+    export_scene(
+        pat, scenario, out, grid_n=12, n_frames=4, stride=8, transient_mode="superposition"
+    )
+    data = json.loads(out.read_text())
+    assert data["meta"]["transient_mode"] == "superposition"
+    assert len(data["field"]["frames"]) == 4
+    for f in data["field"]["frames"]:
+        assert len(f["t_max_K"]) == 12 and len(f["t_max_K"][0]) == 12
 
 
 def test_webapp_index_lists_campaigns(tmp_path: Path, scenario: ScenarioConfig) -> None:
