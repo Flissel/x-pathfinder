@@ -360,5 +360,173 @@ def evolve(
                 _console.print(f"[green]wrote[/green] {saved}")
 
 
+@app.command("closed-loop")
+def closed_loop(
+    population: int = typer.Option(12, "--pop"),
+    generations: int = typer.Option(3, "--gens"),
+    seed: int = typer.Option(42, "--seed"),
+    machine_kind: str = typer.Option(
+        "mock", "--machine", help="mock | opcua (opcua not implemented in this slice)"
+    ),
+    machine_id: str = typer.Option(
+        None,
+        "--machine-id",
+        help="target machine_id; required for non-mock machines, must be in allowlist",
+    ),
+    allowlist: str = typer.Option(
+        "", "--allowlist", help="comma-separated allowlist of machine ids"
+    ),
+    i_know_what_im_doing: bool = typer.Option(
+        False,
+        "--i-know-what-im-doing",
+        help="REQUIRED for non-mock machines; explicit human acknowledgement",
+    ),
+    time_scale: float = typer.Option(
+        0.0,
+        "--time-scale",
+        help="MockMachine wall-clock dilation; 0=instant, 1=real-time",
+    ),
+    scenario: Path = typer.Option(None, "--scenario"),
+    thermal_png: Path = typer.Option(None, "--thermal-png", help="dump synthetic thermal frame"),
+) -> None:
+    """Run a short EA campaign and deploy the best Pareto member to a machine
+    (default: MockMachine) after passing every pattern through SafetyChecker.
+
+    Real hardware is intentionally not implemented in this slice; the path is
+    architecturally complete (Machine ABC + SafetyChecker + OpcUaConfig stub).
+    """
+    import asyncio
+
+    from laser_sim.fitness.evaluator import PatternEvaluator
+    from laser_sim.genome.engine import GeneticEngine
+    from laser_sim.hardware import (
+        MockMachine,
+        SafetyChecker,
+        SafetyViolation,
+    )
+    from laser_sim.hardware.safety import SafetyConfig
+
+    sc = _load_scenario(scenario)
+    ea = sc.ea.model_copy(
+        update={
+            "population": population,
+            "generations": generations,
+            "seed": seed,
+        }
+    )
+    if machine_kind == "mock":
+        machine = MockMachine(scenario=sc, time_scale=time_scale)
+        target_id = sc.machine.machine_id
+        is_mock = True
+    elif machine_kind == "opcua":
+        _console.print(
+            "[red]opcua bridge not implemented in this slice[/red]: "
+            "install with `pip install -e \".[hardware]\"` and wire a vendor adapter"
+        )
+        raise typer.Exit(code=2)
+    else:
+        _console.print(f"[red]unknown --machine[/red]: {machine_kind}")
+        raise typer.Exit(code=2)
+
+    allow = tuple(s for s in allowlist.split(",") if s.strip())
+    safety = SafetyChecker(config=SafetyConfig(machine_allowlist=allow))
+    _console.print(
+        f"[bold]closed-loop[/bold] machine={machine_kind} id={target_id} "
+        f"pop={ea.population} gens={ea.generations} ack={i_know_what_im_doing}"
+    )
+
+    evaluator = PatternEvaluator(sc.material, sc.machine, sc.roi, mode="field", grid_n=31, stride=6)
+    eng = GeneticEngine(
+        material=sc.material,
+        machine=sc.machine,
+        roi=sc.roi,
+        ea=ea,
+        evaluator=evaluator,
+    )
+    log = eng.run()
+    best = log.best()
+    if best is None:
+        _console.print("[red]EA produced no solutions[/red]")
+        raise typer.Exit(code=1)
+    _console.print(
+        f"[green]EA done[/green] archive={len(log.archive)} "
+        f"best_J={best.scalar_J:.4f} kind={best.chromosome.primitive_kind.value}"
+    )
+    pattern = build_primitive(best.chromosome.to_primitive_spec(), sc.roi)
+
+    # Safety gate
+    decision = safety.check(
+        pattern=pattern,
+        scenario=sc,
+        target_machine_id=target_id,
+        acknowledge=i_know_what_im_doing,
+        is_mock=is_mock,
+        hatch_mm=best.chromosome.hatch_um * 1e-3,
+    )
+    if decision.warnings:
+        for w in decision.warnings:
+            _console.print(f"[yellow]safety warning[/yellow]: {w}")
+    if not decision.allowed:
+        for v in decision.violations:
+            _console.print(f"[red]safety violation[/red]: {v}")
+        try:
+            decision.raise_if_blocked()
+        except SafetyViolation as e:
+            _console.print(f"[red]REJECTED[/red]: {e}")
+            raise typer.Exit(code=3)
+    _console.print("[green]safety OK[/green]")
+
+    async def _run() -> None:
+        job = await machine.upload_pattern(pattern)
+        _console.print(f"uploaded job [bold]{job}[/bold]")
+        await machine.start_build(job)
+        _console.print("build started")
+        st = await machine.status()
+        _console.print(
+            f"status: state={st.state.value} progress={st.progress*100:.1f}% "
+            f"O2={st.chamber_o2_ppm:.0f}ppm"
+        )
+        thermal = await machine.read_thermal()
+        if thermal is not None:
+            _console.print(
+                f"thermal frame: {thermal.frame_K.shape} K, pixel={thermal.pixel_um:.1f}um, "
+                f"sensor={thermal.sensor}, t_max={float(thermal.frame_K.max()):.0f}K"
+            )
+            if thermal_png is not None:
+                import matplotlib.pyplot as plt
+
+                fig, ax = plt.subplots(figsize=(7, 6))
+                im = ax.imshow(
+                    thermal.frame_K.T,
+                    origin="lower",
+                    extent=(
+                        thermal.origin_xy_mm[0],
+                        thermal.origin_xy_mm[0] + thermal.frame_K.shape[0] * thermal.pixel_um / 1000.0,
+                        thermal.origin_xy_mm[1],
+                        thermal.origin_xy_mm[1] + thermal.frame_K.shape[1] * thermal.pixel_um / 1000.0,
+                    ),
+                    cmap="inferno",
+                    aspect="equal",
+                )
+                fig.colorbar(im, ax=ax, label="T_max [K]")
+                ax.set_title(
+                    f"synthetic thermal | {machine_kind} | job {job} | sensor {thermal.sensor}"
+                )
+                ax.set_xlabel("x [mm]")
+                ax.set_ylabel("y [mm]")
+                thermal_png.parent.mkdir(parents=True, exist_ok=True)
+                fig.tight_layout()
+                fig.savefig(thermal_png, dpi=150)
+                plt.close(fig)
+                _console.print(f"[green]wrote[/green] {thermal_png}")
+        pyro = await machine.read_pyrometer()
+        if pyro is not None:
+            _console.print(
+                f"pyrometer: T={pyro.temperature_K:.0f}K at t={pyro.timestamp_s:.3f}s"
+            )
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
     app()
