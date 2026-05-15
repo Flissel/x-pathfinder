@@ -56,6 +56,10 @@ def _kind_swap(c: Chromosome, machine: MachineConfig, sigma_mult: float, rng: ra
         extras["samples_per_turn"] = rng.choice([32, 48, 64, 96])
     elif new is PrimitiveKind.HILBERT:
         extras["order"] = rng.choice([3, 4, 5])
+    elif new is PrimitiveKind.ISLAND:
+        extras["tile_size_mm"] = rng.uniform(1.5, 4.0)
+        extras["shuffle"] = True
+        extras["shuffle_seed"] = rng.randrange(0, 1_000_000)
     return replace(c, primitive_kind=new, extras=extras).clamped(machine)
 
 

@@ -20,8 +20,12 @@ from laser_sim.config.schema import MachineConfig
 from laser_sim.patterns.base import PrimitiveKind, PrimitiveSpec
 from laser_sim.patterns.primitives import _BUILDERS  # only built-in kinds
 
-# only the kinds that have a builder are eligible until others are implemented
-_ELIGIBLE_KINDS: tuple[PrimitiveKind, ...] = tuple(_BUILDERS.keys())
+# Primitives the EA may use. WAYPOINT needs an explicit polyline, which the
+# current Chromosome doesn't carry — that lands when WaypointGene is added.
+_EA_EXCLUDED: frozenset[PrimitiveKind] = frozenset({PrimitiveKind.WAYPOINT})
+_ELIGIBLE_KINDS: tuple[PrimitiveKind, ...] = tuple(
+    k for k in _BUILDERS.keys() if k not in _EA_EXCLUDED
+)
 _ALLOWED_ROTATIONS: tuple[float, ...] = (0.0, 67.0, 90.0)
 
 
@@ -99,6 +103,10 @@ def random_chromosome(machine: MachineConfig, rng: random.Random) -> Chromosome:
         extras["samples_per_turn"] = rng.choice([32, 48, 64, 96])
     elif kind is PrimitiveKind.HILBERT:
         extras["order"] = rng.choice([3, 4, 5])
+    elif kind is PrimitiveKind.ISLAND:
+        extras["tile_size_mm"] = rng.uniform(1.5, 4.0)
+        extras["shuffle"] = True
+        extras["shuffle_seed"] = rng.randrange(0, 1_000_000)
     return Chromosome(
         primitive_kind=kind,
         power_W=rng.uniform(las.power_min_W, las.power_max_W),

@@ -126,7 +126,67 @@ def test_total_time_consistent_with_length() -> None:
 
 def test_unimplemented_primitive_raises(roi: GeometryROI) -> None:
     with pytest.raises(NotImplementedError):
-        build_primitive(_spec(PrimitiveKind.ISLAND), roi)
+        build_primitive(_spec(PrimitiveKind.VORONOI), roi)
+
+
+def test_island_tiles_partition_roi(roi: GeometryROI) -> None:
+    pat = build_primitive(
+        _spec(PrimitiveKind.ISLAND, hatch_um=300.0, params={"tile_size_mm": 2.5, "shuffle": False}), roi
+    )
+    # 5mm ROI / 2.5mm tiles -> 2x2 = 4 tiles
+    assert len(pat.segments) > 0
+    xs = [w.x_mm for s in pat.segments for w in s.waypoints]
+    ys = [w.y_mm for s in pat.segments for w in s.waypoints]
+    assert min(xs) == pytest.approx(roi.x0_mm)
+    assert max(xs) == pytest.approx(roi.x1_mm)
+    assert min(ys) == pytest.approx(roi.y0_mm)
+    assert max(ys) == pytest.approx(roi.y1_mm)
+
+
+def test_island_shuffle_is_deterministic_under_seed(roi: GeometryROI) -> None:
+    a = build_primitive(
+        _spec(PrimitiveKind.ISLAND, params={"tile_size_mm": 2.0, "shuffle": True, "shuffle_seed": 7}), roi
+    )
+    b = build_primitive(
+        _spec(PrimitiveKind.ISLAND, params={"tile_size_mm": 2.0, "shuffle": True, "shuffle_seed": 7}), roi
+    )
+    # same seed -> identical segment sequence
+    assert len(a.segments) == len(b.segments)
+    for sa, sb in zip(a.segments, b.segments):
+        for wa, wb in zip(sa.waypoints, sb.waypoints):
+            assert wa.x_mm == pytest.approx(wb.x_mm)
+            assert wa.y_mm == pytest.approx(wb.y_mm)
+
+
+def test_waypoint_emits_polyline(roi: GeometryROI) -> None:
+    pts = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0)]
+    pat = build_primitive(_spec(PrimitiveKind.WAYPOINT, params={"waypoints": pts}), roi)
+    assert len(pat.segments) == 1
+    wps = pat.segments[0].waypoints
+    assert len(wps) == 5
+
+
+def test_waypoint_per_segment_overrides(roi: GeometryROI) -> None:
+    pts = [(-1.0, 0.0), (0.0, 0.0), (1.0, 0.0)]
+    powers = [100.0, 300.0]
+    speeds = [500.0, 1500.0]
+    pat = build_primitive(
+        _spec(
+            PrimitiveKind.WAYPOINT,
+            params={"waypoints": pts, "power_per_segment": powers, "speed_per_segment": speeds},
+        ),
+        roi,
+    )
+    assert len(pat.segments) == 2
+    assert pat.segments[0].power_W == pytest.approx(100.0)
+    assert pat.segments[1].power_W == pytest.approx(300.0)
+    assert pat.segments[0].speed_mm_s == pytest.approx(500.0)
+    assert pat.segments[1].speed_mm_s == pytest.approx(1500.0)
+
+
+def test_waypoint_rejects_too_few_points(roi: GeometryROI) -> None:
+    with pytest.raises(ValueError):
+        build_primitive(_spec(PrimitiveKind.WAYPOINT, params={"waypoints": [(0.0, 0.0)]}), roi)
 
 
 def test_hilbert_covers_roi_bbox(roi: GeometryROI) -> None:

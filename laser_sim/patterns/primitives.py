@@ -170,11 +170,122 @@ def _build_spiral(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
     )
 
 
+def _build_island(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
+    """Chess-board / island scanning: ROI tiled into N x N tiles, each filled
+    with a small zigzag, neighbouring tiles rotated 90 deg to disrupt
+    long-range residual stress and heat accumulation. Common LPBF strategy.
+
+    params:
+      tile_size_mm: side of one square tile (default 2.5 mm)
+      shuffle: if True, traverse tiles in pseudo-random order; else row-major
+      shuffle_seed: rng seed when shuffle is True
+    """
+    tile_size_mm = float(spec.params.get("tile_size_mm", 2.5))
+    if tile_size_mm <= 0:
+        raise ValueError("tile_size_mm must be positive")
+    shuffle = bool(spec.params.get("shuffle", True))
+    seed = int(spec.params.get("shuffle_seed", 0))
+    hatch_mm = spec.hatch_um * 1e-3
+    cx = 0.5 * (roi.x0_mm + roi.x1_mm)
+    cy = 0.5 * (roi.y0_mm + roi.y1_mm)
+
+    nx = max(1, math.ceil(roi.width_mm / tile_size_mm))
+    ny = max(1, math.ceil(roi.height_mm / tile_size_mm))
+    tile_indices = [(ix, iy) for ix in range(nx) for iy in range(ny)]
+    if shuffle:
+        import random as _random
+
+        rng = _random.Random(seed)
+        rng.shuffle(tile_indices)
+
+    segments: list[Segment] = []
+    for ix, iy in tile_indices:
+        x0 = roi.x0_mm + ix * tile_size_mm
+        y0 = roi.y0_mm + iy * tile_size_mm
+        x1 = min(roi.x0_mm + (ix + 1) * tile_size_mm, roi.x1_mm)
+        y1 = min(roi.y0_mm + (iy + 1) * tile_size_mm, roi.y1_mm)
+        if x1 - x0 <= 1e-9 or y1 - y0 <= 1e-9:
+            continue
+        # checkerboard parity decides scan direction (alternate by 90 deg)
+        rotate_90 = ((ix + iy) % 2) == 1
+        n_lines = max(2, int((y1 - y0) / hatch_mm) + 1)
+        ys = np.linspace(y0, y1, n_lines)
+        for li, y in enumerate(ys):
+            if not rotate_90:
+                if li % 2 == 0:
+                    p0 = np.array([x0, y])
+                    p1 = np.array([x1, y])
+                else:
+                    p0 = np.array([x1, y])
+                    p1 = np.array([x0, y])
+            else:
+                # transposed: scan vertically within tile
+                xc = x0 + (y - y0)  # parametrise by line index instead
+                xc = x0 + li * (x1 - x0) / max(n_lines - 1, 1)
+                if li % 2 == 0:
+                    p0 = np.array([xc, y0])
+                    p1 = np.array([xc, y1])
+                else:
+                    p0 = np.array([xc, y1])
+                    p1 = np.array([xc, y0])
+            pts = _rotate(np.stack([p0, p1]), spec.rotation_deg, (cx, cy))
+            segments.append(
+                Segment(
+                    waypoints=(Waypoint(*pts[0]), Waypoint(*pts[1])),
+                    power_W=spec.power_W,
+                    speed_mm_s=spec.speed_mm_s,
+                )
+            )
+    return tuple(segments)
+
+
+def _build_waypoint(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
+    """Explicit polyline. params['waypoints'] = [(x_mm, y_mm), ...].
+
+    Optional params:
+      power_per_segment: list of P (W), one per polyline edge (overrides spec.power_W)
+      speed_per_segment: list of v (mm/s), one per edge (overrides spec.speed_mm_s)
+    """
+    raw = spec.params.get("waypoints")
+    if not raw:
+        raise ValueError("waypoint primitive requires params['waypoints'] = [(x, y), ...]")
+    pts = np.array(raw, dtype=float)
+    if pts.ndim != 2 or pts.shape[1] != 2 or pts.shape[0] < 2:
+        raise ValueError(f"waypoints must be (>=2, 2); got shape {pts.shape}")
+    cx = 0.5 * (roi.x0_mm + roi.x1_mm)
+    cy = 0.5 * (roi.y0_mm + roi.y1_mm)
+    pts = _rotate(pts, spec.rotation_deg, (cx, cy))
+    powers = spec.params.get("power_per_segment")
+    speeds = spec.params.get("speed_per_segment")
+    if powers is not None or speeds is not None:
+        n_edges = pts.shape[0] - 1
+        powers = list(powers) if powers is not None else [spec.power_W] * n_edges
+        speeds = list(speeds) if speeds is not None else [spec.speed_mm_s] * n_edges
+        if len(powers) != n_edges or len(speeds) != n_edges:
+            raise ValueError(
+                f"power/speed per segment must have length {n_edges}; "
+                f"got {len(powers)}, {len(speeds)}"
+            )
+        segments = tuple(
+            Segment(
+                waypoints=(Waypoint(*pts[k]), Waypoint(*pts[k + 1])),
+                power_W=float(powers[k]),
+                speed_mm_s=float(speeds[k]),
+            )
+            for k in range(n_edges)
+        )
+        return segments
+    wps = tuple(Waypoint(float(p[0]), float(p[1])) for p in pts)
+    return (Segment(waypoints=wps, power_W=spec.power_W, speed_mm_s=spec.speed_mm_s),)
+
+
 _BUILDERS: dict[PrimitiveKind, Callable[[PrimitiveSpec, GeometryROI], tuple[Segment, ...]]] = {
     PrimitiveKind.ZIGZAG: _build_zigzag,
     PrimitiveKind.STRIPES: _build_stripes,
     PrimitiveKind.SPIRAL: _build_spiral,
     PrimitiveKind.HILBERT: _build_hilbert,
+    PrimitiveKind.ISLAND: _build_island,
+    PrimitiveKind.WAYPOINT: _build_waypoint,
 }
 
 

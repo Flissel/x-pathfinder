@@ -1,3 +1,10 @@
+from laser_sim.validation.calibration import (
+    CalibrationProblem,
+    CalibrationResult,
+    DEFAULT_LEVEL1_PARAMETERS,
+    ParameterBound,
+    calibrate,
+)
 from laser_sim.validation.ingest import (
     Measurement,
     MeasurementSet,
@@ -18,13 +25,18 @@ from laser_sim.validation.score import (
 )
 
 __all__ = [
+    "CalibrationProblem",
+    "CalibrationResult",
+    "DEFAULT_LEVEL1_PARAMETERS",
     "FieldFeatures",
     "Measurement",
     "MeasurementSet",
+    "ParameterBound",
     "PyrometerTrace",
     "RigidTransform",
     "SimRealScore",
     "ThermalFrame",
+    "calibrate",
     "cosine_similarity",
     "extract_field_features",
     "iou_mask",

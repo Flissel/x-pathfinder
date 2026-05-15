@@ -497,6 +497,79 @@ def validate(
         _console.print(f"[green]wrote[/green] {report_png}")
 
 
+@app.command("calibrate")
+def calibrate_cmd(
+    sim_pattern_kind: str = typer.Option("zigzag", "--sim-primitive"),
+    sim_power: float = typer.Option(200.0, "--sim-power"),
+    sim_speed: float = typer.Option(800.0, "--sim-speed"),
+    sim_hatch: float = typer.Option(100.0, "--sim-hatch"),
+    real_dir: Path = typer.Option(..., "--real"),
+    scenario: Path = typer.Option(None, "--scenario"),
+    rounds: int = typer.Option(2, "--rounds"),
+    out_json: Path = typer.Option(Path("posterior.json"), "--out"),
+    grid_n: int = typer.Option(31, "--grid-n"),
+    stride: int = typer.Option(6, "--stride"),
+) -> None:
+    """Calibrate (absorptivity, spot_um, emissivity) against a measurement set.
+
+    Hierarchical 1D-line-search per parameter, repeated for `--rounds`. Writes
+    a posterior JSON containing the optimum and the before/after composite
+    scores. The optimum can be re-applied via `cli evolve` once
+    persistence is wired (next slice).
+    """
+    from laser_sim.validation import (
+        DEFAULT_LEVEL1_PARAMETERS,
+        CalibrationProblem,
+        calibrate,
+        load_measurement_set,
+    )
+
+    sc = _load_scenario(scenario)
+    try:
+        kind = PrimitiveKind(sim_pattern_kind)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {sim_pattern_kind}")
+        raise typer.Exit(code=2)
+    spec = PrimitiveSpec(
+        kind=kind,
+        power_W=sim_power,
+        speed_mm_s=sim_speed,
+        hatch_um=sim_hatch,
+        spot_um=80.0,
+    )
+    pat = build_primitive(spec, sc.roi)
+    ms = load_measurement_set(real_dir)
+
+    problem = CalibrationProblem(
+        pattern=pat,
+        measurements=ms,
+        base_scenario=sc,
+        parameters=DEFAULT_LEVEL1_PARAMETERS,
+        hatch_mm=sim_hatch * 1e-3,
+        grid_n=grid_n,
+        stride=stride,
+    )
+    _console.print(
+        f"[bold]calibrating[/bold] {len(DEFAULT_LEVEL1_PARAMETERS)} params over "
+        f"{rounds} rounds against {ms.experiment_id} ({len(ms.items)} measurements)"
+    )
+    result = calibrate(problem, rounds=rounds)
+    table = Table(title="Calibration result")
+    for col in ("param", "default", "optimum", "delta"):
+        table.add_column(col)
+    for p in DEFAULT_LEVEL1_PARAMETERS:
+        opt = result.optimum[p.name]
+        table.add_row(p.name, f"{p.default:.3f}", f"{opt:.3f}", f"{opt - p.default:+.3f}")
+    _console.print(table)
+    _console.print(
+        f"composite: [bold]{result.initial_score.composite:.4f}[/bold] -> "
+        f"[bold green]{result.final_score.composite:.4f}[/bold green] "
+        f"(rmse {result.initial_score.rmse_K:.0f}K -> {result.final_score.rmse_K:.0f}K)"
+    )
+    saved = result.to_json(out_json)
+    _console.print(f"[green]wrote[/green] {saved}")
+
+
 @app.command("viz-pareto")
 def viz_pareto(
     archive_json: Path = typer.Option(..., "--archive", help="archive JSON from `evolve --archive-json`"),
