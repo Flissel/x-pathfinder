@@ -1,0 +1,11 @@
+#!/bin/sh
+# laser_sim auto-generated Allrun for laserbeamFoam
+# scenario_id: {{ scenario_id }}
+set -e
+runApplication() { app="$1"; shift; echo ">>> $app"; "$app" "$@" 2>&1 | tee log."$app"; }
+
+runApplication blockMesh
+# Optional powder-bed IC (lands when coupling/dem_to_cfd is invoked):
+#   runApplication setFields
+runApplication laserbeamFoam
+# echo ">>> done"; touch case.OK

@@ -1,0 +1,10 @@
+FoamFile { version 2.0; format ascii; class volScalarField; object T; }
+
+dimensions [0 0 0 1 0 0 0];
+internalField uniform {{ preheat_K }};
+boundaryField
+{
+    floor   { type fixedValue; value uniform {{ preheat_K }}; }
+    top     { type zeroGradient; }
+    sides   { type zeroGradient; }
+}

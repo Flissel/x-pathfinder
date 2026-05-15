@@ -107,6 +107,10 @@ def random_chromosome(machine: MachineConfig, rng: random.Random) -> Chromosome:
         extras["tile_size_mm"] = rng.uniform(1.5, 4.0)
         extras["shuffle"] = True
         extras["shuffle_seed"] = rng.randrange(0, 1_000_000)
+    elif kind is PrimitiveKind.VORONOI:
+        extras["n_cells"] = rng.choice([4, 6, 8, 12, 16])
+        extras["lloyd_iter"] = rng.choice([1, 2, 3])
+        extras["seed"] = rng.randrange(0, 1_000_000)
     return Chromosome(
         primitive_kind=kind,
         power_W=rng.uniform(las.power_min_W, las.power_max_W),

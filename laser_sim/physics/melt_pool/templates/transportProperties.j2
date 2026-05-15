@@ -1,0 +1,34 @@
+FoamFile { version 2.0; format ascii; class dictionary; object transportProperties; }
+
+phases (metal gas);
+
+metal
+{
+    rhoSolid    {{ rho_solid }};
+    rhoLiquid   {{ rho_liquid }};
+    cpSolid     {{ cp_solid }};
+    cpLiquid    {{ cp_liquid }};
+    kSolid      {{ k_solid }};
+    kLiquid     {{ k_liquid }};
+    solidus     {{ solidus_K }};
+    liquidus    {{ liquidus_K }};
+    Lf          {{ latent_heat_fusion }};
+    boiling     {{ boiling_K }};
+    emissivity  {{ emissivity }};
+}
+
+gas
+{
+    rho         1.2;
+    cp          1005.0;
+    k           0.026;
+}
+
+laser
+{
+    absorptivity   {{ absorptivity }};
+    spotRadius     {{ spot_radius_m }};
+    pathFile       "constant/laserPath";
+}
+
+sigma 1.84; // surface tension Ti64 [N/m], placeholder

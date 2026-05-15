@@ -1,0 +1,28 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| laser_sim auto-generated controlDict                                         |
+| scenario_id: {{ scenario_id }}                                               |
+\*---------------------------------------------------------------------------*/
+FoamFile { version 2.0; format ascii; class dictionary; object controlDict; }
+
+application      laserbeamFoam;
+startFrom        startTime;
+startTime        0;
+stopAt           endTime;
+endTime          {{ end_time }};
+deltaT           1e-6;
+adjustTimeStep   yes;
+maxCo            0.5;
+maxAlphaCo       0.3;
+maxDeltaT        5e-5;
+
+writeControl     adjustableRunTime;
+writeInterval    {{ write_interval }};
+purgeWrite       0;
+writeFormat      binary;
+writePrecision   8;
+writeCompression on;
+timeFormat       general;
+timePrecision    8;
+runTimeModifiable true;
+
+functions { /* postprocess hooks land here */ }

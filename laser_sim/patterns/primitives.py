@@ -170,6 +170,101 @@ def _build_spiral(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
     )
 
 
+def _build_voronoi(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
+    """Voronoi-patch scanning: ROI partitioned into N random seeds (Lloyd-
+    relaxed for low variance), each Voronoi cell filled with a small
+    parallel raster aligned to a random angle.
+
+    params:
+      n_cells: target seed count (default 8)
+      lloyd_iter: Lloyd relaxation iterations (default 3; 0 disables)
+      seed: rng seed
+    """
+    n_cells = max(2, int(spec.params.get("n_cells", 8)))
+    lloyd_iter = max(0, int(spec.params.get("lloyd_iter", 3)))
+    seed = int(spec.params.get("seed", 0))
+    hatch_mm = spec.hatch_um * 1e-3
+    import random as _random
+
+    rng = _random.Random(seed)
+    cx = 0.5 * (roi.x0_mm + roi.x1_mm)
+    cy = 0.5 * (roi.y0_mm + roi.y1_mm)
+    pts = np.array(
+        [
+            [rng.uniform(roi.x0_mm, roi.x1_mm), rng.uniform(roi.y0_mm, roi.y1_mm)]
+            for _ in range(n_cells)
+        ]
+    )
+
+    # Lloyd's algorithm via Monte-Carlo centroidal estimation (no scipy):
+    # sample many points inside ROI, assign each to its nearest seed, and
+    # move each seed to the centroid of its assigned samples.
+    n_mc = 2000
+    for _ in range(lloyd_iter):
+        samples = np.column_stack(
+            [
+                np.array([rng.uniform(roi.x0_mm, roi.x1_mm) for _ in range(n_mc)]),
+                np.array([rng.uniform(roi.y0_mm, roi.y1_mm) for _ in range(n_mc)]),
+            ]
+        )
+        d2 = ((samples[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
+        owner = np.argmin(d2, axis=1)
+        new_pts = pts.copy()
+        for k in range(n_cells):
+            mask = owner == k
+            if mask.any():
+                new_pts[k] = samples[mask].mean(axis=0)
+        pts = new_pts
+
+    # For each Voronoi cell: sample grid points inside the cell, fit an
+    # axis-aligned bounding box rotated by a per-cell random angle, then
+    # raster-fill that box with hatch lines. Lines outside the cell are
+    # clipped at the cell boundary (defined by nearest-seed rule).
+    grid_n = 80
+    gx = np.linspace(roi.x0_mm, roi.x1_mm, grid_n)
+    gy = np.linspace(roi.y0_mm, roi.y1_mm, grid_n)
+    Xg, Yg = np.meshgrid(gx, gy, indexing="ij")
+    cells = np.column_stack([Xg.ravel(), Yg.ravel()])
+    d2 = ((cells[:, None, :] - pts[None, :, :]) ** 2).sum(-1)
+    owner = np.argmin(d2, axis=1)
+
+    segments: list[Segment] = []
+    for k in range(n_cells):
+        mask = owner == k
+        if mask.sum() < 4:
+            continue
+        cell_pts = cells[mask]
+        ang = rng.uniform(0.0, 90.0)
+        rad = math.radians(ang)
+        c_, s_ = math.cos(rad), math.sin(rad)
+        # rotate cell to align with hatch axis
+        local = cell_pts - cell_pts.mean(axis=0)
+        rot = np.array([[c_, s_], [-s_, c_]])
+        rotated = local @ rot.T
+        xmin, ymin = rotated.min(axis=0)
+        xmax, ymax = rotated.max(axis=0)
+        n_lines = max(2, int((ymax - ymin) / hatch_mm) + 1)
+        ys = np.linspace(ymin, ymax, n_lines)
+        for li, y in enumerate(ys):
+            if li % 2 == 0:
+                p0 = np.array([xmin, y])
+                p1 = np.array([xmax, y])
+            else:
+                p0 = np.array([xmax, y])
+                p1 = np.array([xmin, y])
+            # rotate back into global frame
+            world = np.stack([p0, p1]) @ rot + cell_pts.mean(axis=0)
+            world = _rotate(world, spec.rotation_deg, (cx, cy))
+            segments.append(
+                Segment(
+                    waypoints=(Waypoint(*world[0]), Waypoint(*world[1])),
+                    power_W=spec.power_W,
+                    speed_mm_s=spec.speed_mm_s,
+                )
+            )
+    return tuple(segments)
+
+
 def _build_island(spec: PrimitiveSpec, roi: GeometryROI) -> tuple[Segment, ...]:
     """Chess-board / island scanning: ROI tiled into N x N tiles, each filled
     with a small zigzag, neighbouring tiles rotated 90 deg to disrupt
@@ -285,6 +380,7 @@ _BUILDERS: dict[PrimitiveKind, Callable[[PrimitiveSpec, GeometryROI], tuple[Segm
     PrimitiveKind.SPIRAL: _build_spiral,
     PrimitiveKind.HILBERT: _build_hilbert,
     PrimitiveKind.ISLAND: _build_island,
+    PrimitiveKind.VORONOI: _build_voronoi,
     PrimitiveKind.WAYPOINT: _build_waypoint,
 }
 

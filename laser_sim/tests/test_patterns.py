@@ -126,7 +126,7 @@ def test_total_time_consistent_with_length() -> None:
 
 def test_unimplemented_primitive_raises(roi: GeometryROI) -> None:
     with pytest.raises(NotImplementedError):
-        build_primitive(_spec(PrimitiveKind.VORONOI), roi)
+        build_primitive(_spec(PrimitiveKind.ADAPTIVE_PATCH), roi)
 
 
 def test_island_tiles_partition_roi(roi: GeometryROI) -> None:

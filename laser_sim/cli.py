@@ -235,6 +235,18 @@ def evolve(
     campaign_name: str = typer.Option(
         None, "--name", help="campaign name when persisting; auto-generated if omitted"
     ),
+    hf_promote: int = typer.Option(
+        0,
+        "--hf-promote",
+        help="Top-K candidates per generation to promote to HF (case is generated; "
+        "actual laserbeamFoam exec only if --hf-run is passed AND solver available)",
+    ),
+    hf_run: bool = typer.Option(
+        False, "--hf-run", help="actually invoke laserbeamFoam on promoted candidates"
+    ),
+    hf_case_root: Path = typer.Option(
+        Path("./hf_runs"), "--hf-case-root", help="root directory for promoted HF cases"
+    ),
 ) -> None:
     """Run the NSGA-II evolutionary loop with the Eagar-Tsai proxy.
 
@@ -304,9 +316,54 @@ def evolve(
                 f"[green]hydrated[/green] {len(accumulator)} prior evaluations from disk"
             )
 
+    fidelity_gate = None
+    if hf_promote > 0:
+        from laser_sim.fidelity import FidelityGate, PromotionPolicy
+
+        fidelity_gate = FidelityGate(
+            policy=PromotionPolicy(
+                hf_promote_top_k=hf_promote,
+                fast_only_until_gen=min(2, generations // 2),
+                hf_promote_pareto_front=True,
+            )
+        )
+        hf_case_root.mkdir(parents=True, exist_ok=True)
+
     def _commit(g: int, entries: list) -> None:
         if accumulator is not None:
             accumulator.commit_archive(entries, generation=g)
+        if fidelity_gate is None:
+            return
+        decision = fidelity_gate.decide(generation=g, population=entries, archive_entries=entries)
+        if decision.skipped:
+            _console.print(f"[dim]gen {g}: fidelity gate -> {decision.skipped_reason}[/dim]")
+            return
+        _console.print(
+            f"[bold magenta]gen {g}: fidelity gate -> {len(decision.promoted)} candidate(s) promoted to HF[/bold magenta]"
+        )
+        for i, (e, reason) in enumerate(zip(decision.promoted, decision.reasons)):
+            try:
+                from laser_sim.physics.melt_pool import (
+                    build_laserbeamfoam_case,
+                    laserbeamfoam_available,
+                )
+
+                cdir = hf_case_root / f"gen{g}_p{i:02d}_{e.chromosome.hash_id()}"
+                pat = build_primitive(e.chromosome.to_primitive_spec(), sc.roi)
+                case = build_laserbeamfoam_case(
+                    pat, sc, case_dir=cdir, spot_um=e.chromosome.spot_um
+                )
+                msg = f"  [{reason}] J={e.scalar_J:.3f} -> {case.case_dir}"
+                if hf_run and laserbeamfoam_available():
+                    import asyncio
+                    from laser_sim.physics.melt_pool import LaserbeamFoamRunner
+
+                    runner = LaserbeamFoamRunner()
+                    result = asyncio.run(runner.run(case))
+                    msg += f"  [run: {'OK' if result.success else 'FAIL'} in {result.walltime_s:.0f}s]"
+                _console.print(msg)
+            except Exception as ex:
+                _console.print(f"  [yellow]HF promote failed[/yellow]: {ex}")
 
     table = Table(title="Evolution log")
     for col in ("gen", "front0", "archive", "best_J", "median_J", "HV2D", "crisis"):
@@ -555,6 +612,86 @@ def validate(
         fig.savefig(report_png, dpi=140)
         plt.close(fig)
         _console.print(f"[green]wrote[/green] {report_png}")
+
+
+@app.command("hf-sim")
+def hf_sim(
+    primitive: str = typer.Option("zigzag", "--primitive"),
+    power: float = typer.Option(200.0, "--power"),
+    speed: float = typer.Option(800.0, "--speed"),
+    hatch: float = typer.Option(100.0, "--hatch"),
+    spot: float = typer.Option(80.0, "--spot"),
+    cell_size_um: float = typer.Option(25.0, "--cell-size"),
+    case_dir: Path = typer.Option(Path("./hf_case"), "--case"),
+    scenario: Path = typer.Option(None, "--scenario"),
+    run: bool = typer.Option(
+        False, "--run", help="execute laserbeamFoam if available (off by default)"
+    ),
+) -> None:
+    """Generate a laserbeamFoam case folder for a single pattern, optionally
+    invoke the HF solver. Without --run the command only writes the case
+    directory; this is the right path when you plan to ship the case to a
+    Slurm/K8s worker."""
+    from laser_sim.physics.melt_pool import (
+        LaserbeamFoamRunner,
+        build_laserbeamfoam_case,
+        laserbeamfoam_available,
+    )
+    import asyncio
+
+    sc = _load_scenario(scenario)
+    try:
+        kind = PrimitiveKind(primitive)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {primitive}")
+        raise typer.Exit(code=2)
+    spec = PrimitiveSpec(
+        kind=kind, power_W=power, speed_mm_s=speed, hatch_um=hatch, spot_um=spot
+    )
+    pat = build_primitive(spec, sc.roi)
+    case = build_laserbeamfoam_case(pat, sc, case_dir=case_dir, spot_um=spot, cell_size_um=cell_size_um)
+    _console.print(
+        f"[green]wrote[/green] OpenFOAM case at {case.case_dir}: "
+        f"end_time={case.end_time_s:.3f}s, {case.n_path_samples} path samples"
+    )
+    if not run:
+        _console.print(
+            "[bold]not executing[/bold] (pass --run to launch laserbeamFoam locally). "
+            f"laserbeamFoam available on PATH: {laserbeamfoam_available()}"
+        )
+        return
+    runner = LaserbeamFoamRunner()
+    result = asyncio.run(runner.run(case))
+    if result.success:
+        _console.print(
+            f"[green]HF run OK[/green] walltime={result.walltime_s:.1f}s"
+        )
+    else:
+        _console.print(
+            f"[red]HF run failed[/red] exit={result.exit_code}: {result.stderr[:200]}"
+        )
+
+
+@app.command("pack-bed")
+def pack_bed(
+    scenario: Path = typer.Option(None, "--scenario"),
+    seed: int = typer.Option(0, "--seed"),
+    out_dir: Path = typer.Option(Path("./powder_cache"), "--out"),
+    force: bool = typer.Option(False, "--force", help="rebuild even if cached"),
+) -> None:
+    """Generate a powder bed for the current scenario (LIGGGHTS or synthetic)."""
+    from laser_sim.physics.powder_bed import liggghts_available, pack_powder_bed
+
+    sc = _load_scenario(scenario)
+    _console.print(
+        f"[bold]packing[/bold] d50={sc.powder.d50_um}um layer={sc.machine.layer_thickness_um}um "
+        f"liggghts_available={liggghts_available()}"
+    )
+    res = pack_powder_bed(sc.powder, sc.machine, sc.roi, out_dir=out_dir, seed=seed, force=force)
+    _console.print(
+        f"[green]wrote[/green] {res.porosity_npz} method={res.method} "
+        f"fill={res.fill_fraction*100:.1f}% N={res.n_particles}"
+    )
 
 
 @app.command("viz3d")
