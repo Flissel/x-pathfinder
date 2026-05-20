@@ -8,11 +8,14 @@ get their own queue so a slow client doesn't back-pressure the EA.
 
 from __future__ import annotations
 
+import base64
 import json
 import queue
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+
+import numpy as np
 from enum import Enum
 from typing import Any
 
@@ -23,6 +26,7 @@ class EventType(str, Enum):
     HF_PROMOTION = "hf_promotion"
     CAMPAIGN_END = "campaign_end"
     ERROR = "error"
+    VOLUME_FRAME = "volume_frame"
 
 
 @dataclass(frozen=True)
@@ -77,3 +81,42 @@ class EventBus:
     def subscriber_count(self) -> int:
         with self._lock:
             return len(self._subs)
+
+
+def pack_volume_frame(
+    t_max_K: np.ndarray,
+    *,
+    vmin_K: float,
+    vmax_K: float,
+    t_s: float,
+    laser_x_mm: float,
+    laser_y_mm: float,
+    frame_index: int,
+    n_frames: int,
+) -> dict:
+    """Quantize a (Nx, Ny, Nz) T_max volume to uint8 + base64 for SSE wire.
+
+    Decoder (browser-side):
+      const bytes = atob(payload.data_b64);
+      const arr = new Uint8Array(bytes.length);
+      for (let i = 0; i < bytes.length; i++) arr[i] = bytes.charCodeAt(i);
+      // arr indexed (Nx, Ny, Nz) in C-order
+      // T_K(i,j,k) = vmin + (arr[i*Ny*Nz + j*Nz + k] / 255) * (vmax - vmin)
+    """
+    if t_max_K.ndim != 3:
+        raise ValueError(f"expected 3D volume, got shape {t_max_K.shape}")
+    span = max(vmax_K - vmin_K, 1e-6)
+    q = np.clip((t_max_K - vmin_K) / span, 0.0, 1.0)
+    u8 = (q * 255.0 + 0.5).astype(np.uint8)
+    return {
+        "frame_index": int(frame_index),
+        "n_frames": int(n_frames),
+        "t_s": float(t_s),
+        "laser_x_mm": float(laser_x_mm),
+        "laser_y_mm": float(laser_y_mm),
+        "shape": list(t_max_K.shape),
+        "dtype": "uint8",
+        "vmin_K": float(vmin_K),
+        "vmax_K": float(vmax_K),
+        "data_b64": base64.b64encode(u8.tobytes()).decode("ascii"),
+    }

@@ -133,6 +133,173 @@ def t_max_field(
     )
 
 
+@dataclass(frozen=True)
+class FieldVolumeResult:
+    """Volumetric T_max field (Nx, Ny, Nz) for the 3D voxel viewer.
+
+    grid_z_mm[0] == 0 (surface), grid_z_mm[-1] == depth_mm.
+    `frames` is populated when n_time_checkpoints > 1; each entry has
+    keys 't_s' (float) and 't_max_K' (numpy array, (Nx, Ny, Nz)).
+    """
+
+    grid_x_mm: np.ndarray
+    grid_y_mm: np.ndarray
+    grid_z_mm: np.ndarray
+    t_max_K: np.ndarray
+    frames: list
+    liquidus_K: float
+    boiling_K: float
+    preheat_K: float
+    melt_voxel_fraction: float
+    keyhole_voxel_fraction: float
+
+
+def t_max_volume_superposition(
+    path: RasterizedPath,
+    roi: GeometryROI,
+    material: MaterialConfig,
+    machine: MachineConfig,
+    *,
+    spot_um: float,
+    nx: int = 31,
+    ny: int = 31,
+    nz: int = 16,
+    depth_mm: float = 0.4,
+    stride: int = 6,
+    n_time_checkpoints: int = 1,
+    return_frames: bool = False,
+    path_chunk: int = 256,
+) -> FieldVolumeResult:
+    """3D analog of t_max_field_superposition.
+
+    Evaluates the 3D Green's-function superposition on a regular voxel
+    grid (Nx, Ny, Nz) with z = 0 .. depth_mm. The laser path is treated
+    as a sequence of instantaneous point pulses on the substrate surface
+    (path z = 0). For each time checkpoint, the cumulative volume
+    temperature is computed; T_max is reduced as the per-voxel max over
+    all checkpoints.
+
+    Memory note: a naive (Nx, Ny, Nz, Np) buffer is too large for
+    realistic Np (>~1000). We chunk the path axis: each chunk of size
+    `path_chunk` produces (Nx, Ny, Nz, chunk) which is then reduced
+    along the chunk axis and accumulated into the running T at the
+    current checkpoint.
+
+    `return_frames=True` adds per-checkpoint volumes to result.frames
+    (one snapshot per checkpoint), which the scene exporter consumes
+    for the 3D animated viewer.
+    """
+    preheat = float(machine.preheat_K)
+    grid_x = np.linspace(roi.x0_mm, roi.x1_mm, nx)
+    grid_y = np.linspace(roi.y0_mm, roi.y1_mm, ny)
+    grid_z = np.linspace(0.0, depth_mm, nz)
+
+    if path.n_samples() < 2:
+        T = np.full((nx, ny, nz), preheat)
+        return FieldVolumeResult(
+            grid_x_mm=grid_x,
+            grid_y_mm=grid_y,
+            grid_z_mm=grid_z,
+            t_max_K=T,
+            frames=[],
+            liquidus_K=material.liquidus_K,
+            boiling_K=material.boiling_K,
+            preheat_K=preheat,
+            melt_voxel_fraction=0.0,
+            keyhole_voxel_fraction=0.0,
+        )
+
+    keep = path.laser_on & (path.power_W > 0)
+    px = np.asarray(path.x_mm)[keep][::max(stride, 1)]
+    py = np.asarray(path.y_mm)[keep][::max(stride, 1)]
+    pP = np.asarray(path.power_W)[keep][::max(stride, 1)]
+    pt = np.asarray(path.t_s)[keep][::max(stride, 1)]
+    if pt.size < 2:
+        T = np.full((nx, ny, nz), preheat)
+        return FieldVolumeResult(
+            grid_x_mm=grid_x,
+            grid_y_mm=grid_y,
+            grid_z_mm=grid_z,
+            t_max_K=T,
+            frames=[],
+            liquidus_K=material.liquidus_K,
+            boiling_K=material.boiling_K,
+            preheat_K=preheat,
+            melt_voxel_fraction=0.0,
+            keyhole_voxel_fraction=0.0,
+        )
+
+    dt = np.diff(pt, prepend=pt[0])
+    pos_dt = dt[dt > 0]
+    fill = float(np.median(pos_dt)) if pos_dt.size else 1e-5
+    dt = np.where(dt > 0, dt, fill)
+
+    eta = material.absorptivity
+    rho = material.rho_solid
+    cp = material.cp_solid
+    alpha = material.k_solid / (rho * cp)
+    r_min = max(spot_um * 1e-6 * 0.5, 5e-6)
+    r_min2 = r_min ** 2
+
+    # Precompute per-voxel x/y/z² in m². (Zg uses z² because path z = 0.)
+    Xg, Yg, Zg = np.meshgrid(grid_x, grid_y, grid_z, indexing="ij")
+    z2 = (Zg * 1e-3) ** 2  # (Nx, Ny, Nz)
+
+    weights = (eta * pP * dt) / (rho * cp)  # (Np,)
+
+    t0, t1 = float(pt[0]), float(pt[-1])
+    tail = max((t1 - t0) * 0.15, 1e-3)
+    checkpoints = np.linspace(
+        t0 + 1e-5, t1 + tail, max(n_time_checkpoints, 1)
+    )
+
+    T_max = np.full((nx, ny, nz), preheat, dtype=float)
+    frames: list = []
+
+    for tj in checkpoints:
+        T_tj = np.full((nx, ny, nz), preheat, dtype=float)
+        # Process the path in chunks to bound memory at
+        # nx*ny*nz*path_chunk * 8 bytes per intermediate array.
+        for c0 in range(0, pt.size, path_chunk):
+            c1 = min(c0 + path_chunk, pt.size)
+            tau = tj - pt[c0:c1]
+            valid = tau > 1e-9
+            if not valid.any():
+                continue
+            tau_safe = np.where(valid, tau, 1.0)              # (chunk,)
+            denom = (4.0 * np.pi * alpha * tau_safe) ** 1.5    # (chunk,)
+            w_chunk = weights[c0:c1] / denom                   # (chunk,)
+            # dx²+dy² depend on path samples (per chunk); z² is voxel-only.
+            # Xg/Yg/Zg are already (Nx, Ny, Nz), so add only the chunk axis.
+            dx2 = (Xg[:, :, :, None] * 1e-3 - px[None, None, None, c0:c1] * 1e-3) ** 2
+            dy2 = (Yg[:, :, :, None] * 1e-3 - py[None, None, None, c0:c1] * 1e-3) ** 2
+            r2 = dx2 + dy2 + z2[:, :, :, None] + r_min2        # (Nx, Ny, Nz, chunk)
+            kernel = np.where(
+                valid[None, None, None, :],
+                np.exp(-r2 / (4.0 * alpha * tau_safe[None, None, None, :])),
+                0.0,
+            )
+            T_tj += (w_chunk[None, None, None, :] * kernel).sum(axis=3)
+        np.maximum(T_max, T_tj, out=T_max)
+        if return_frames:
+            frames.append({"t_s": float(tj), "t_max_K": T_tj.copy()})
+
+    melt_mask = T_max >= material.liquidus_K
+    kh_mask = T_max >= 0.9 * material.boiling_K
+    return FieldVolumeResult(
+        grid_x_mm=grid_x,
+        grid_y_mm=grid_y,
+        grid_z_mm=grid_z,
+        t_max_K=T_max,
+        frames=frames,
+        liquidus_K=material.liquidus_K,
+        boiling_K=material.boiling_K,
+        preheat_K=preheat,
+        melt_voxel_fraction=float(melt_mask.mean()),
+        keyhole_voxel_fraction=float(kh_mask.mean()),
+    )
+
+
 def t_max_field_superposition(
     path: RasterizedPath,
     roi: GeometryROI,

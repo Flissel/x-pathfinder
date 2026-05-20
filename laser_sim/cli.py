@@ -758,8 +758,15 @@ def viz3d(
     transient_mode: str = typer.Option(
         "superposition",
         "--transient",
-        help="max | superposition (default: physical 3D Green's function)",
+        help="max | superposition | superposition_3d (volume; required for /volume viewer)",
     ),
+    volume: bool = typer.Option(
+        False,
+        "--volume",
+        help="shortcut to set --transient superposition_3d for the 3D voxel viewer",
+    ),
+    nz: int = typer.Option(16, "--nz", help="vertical slices for volume mode"),
+    depth_mm: float = typer.Option(0.4, "--depth", help="bed depth in mm for volume mode"),
     out_json: Path = typer.Option(Path("scene.json"), "--out", "-o"),
 ) -> None:
     """Export a scan-pattern + time-stepped T_max field as a JSON scene that
@@ -778,6 +785,8 @@ def viz3d(
         kind=kind, power_W=power, speed_mm_s=speed, hatch_um=hatch, spot_um=spot, rotation_deg=rotation
     )
     pat = build_primitive(spec, sc.roi)
+    if volume and transient_mode != "superposition_3d":
+        transient_mode = "superposition_3d"
     saved = export_scene(
         pat,
         sc,
@@ -787,14 +796,19 @@ def viz3d(
         n_frames=n_frames,
         stride=stride,
         transient_mode=transient_mode,
+        nz=nz,
+        depth_mm=depth_mm,
     )
+    is_vol = transient_mode == "superposition_3d"
     _console.print(
-        f"[green]wrote[/green] {saved} ({n_frames} frames, {grid_n}^2 grid, "
+        f"[green]wrote[/green] {saved} ({n_frames} frames, "
+        f"{grid_n}²{'×' + str(nz) if is_vol else ''} grid, "
         f"{pat.total_time_s()*1e3:.0f}ms scan, transient={transient_mode})"
     )
+    viewer = "/volume" if is_vol else "/viewer"
     _console.print(
         "next: [bold]python -m laser_sim serve --scene "
-        f"{saved}[/bold] then open http://127.0.0.1:8765/viewer"
+        f"{saved}[/bold] then open http://127.0.0.1:8765" + viewer
     )
 
 

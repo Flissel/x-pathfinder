@@ -152,6 +152,44 @@ def _time_stepped_field_superposition(
     return frames
 
 
+def _time_stepped_volume_superposition(
+    path,
+    scenario: ScenarioConfig,
+    spot_um: float,
+    *,
+    nx: int,
+    ny: int,
+    nz: int,
+    depth_mm: float,
+    n_frames: int,
+    stride: int,
+) -> tuple[list[dict], list[float]]:
+    """3D-volume analog: returns (frames_list, grid_z_mm).
+
+    Each frame is `{t_s, t_max_K}` with `t_max_K` shape `(Nx, Ny, Nz)` as
+    nested Python lists (JSON-serialisable, rounded to 1 K).
+    """
+    from laser_sim.physics.fast_sim import t_max_volume_superposition
+
+    vol = t_max_volume_superposition(
+        path,
+        scenario.roi,
+        scenario.material,
+        scenario.machine,
+        spot_um=spot_um,
+        nx=nx, ny=ny, nz=nz,
+        depth_mm=depth_mm,
+        stride=stride,
+        n_time_checkpoints=max(n_frames, 1),
+        return_frames=True,
+    )
+    frames_out = [
+        {"t_s": float(fr["t_s"]), "t_max_K": np.asarray(fr["t_max_K"]).round(1).tolist()}
+        for fr in vol.frames
+    ]
+    return frames_out, vol.grid_z_mm.round(4).tolist()
+
+
 def export_scene(
     pattern: ScanPattern,
     scenario: ScenarioConfig,
@@ -163,18 +201,29 @@ def export_scene(
     stride: int = 6,
     rasterize_ds_mm: float = 0.05,
     transient_mode: str = "superposition",
+    nz: int = 16,
+    depth_mm: float = 0.4,
 ) -> Path:
     """Build and dump the scene JSON.
 
     transient_mode:
-      "max"           cumulative per-source-max of steady-state Rosenthal
-      "superposition" true time-domain 3D Green's function (physical heat
-                      accumulation; recommended for visualization)
+      "max"               cumulative per-source-max of steady-state Rosenthal (2D, schema v1)
+      "superposition"     true time-domain 3D Green's function on a 2D z=0 grid (schema v1)
+      "superposition_3d"  same kernel sampled on a 3D (Nx, Ny, Nz) voxel grid (schema v2)
     """
     rp = rasterize_pattern(pattern, ds_mm=rasterize_ds_mm)
     grid_x = np.linspace(scenario.roi.x0_mm, scenario.roi.x1_mm, grid_n)
     grid_y = np.linspace(scenario.roi.y0_mm, scenario.roi.y1_mm, grid_n)
-    if transient_mode == "superposition":
+    schema_version = 1
+    grid_z_mm: list[float] | None = None
+    if transient_mode == "superposition_3d":
+        schema_version = 2
+        frames, grid_z_mm = _time_stepped_volume_superposition(
+            rp, scenario, spot_um,
+            nx=grid_n, ny=grid_n, nz=nz, depth_mm=depth_mm,
+            n_frames=n_frames, stride=stride,
+        )
+    elif transient_mode == "superposition":
         frames = _time_stepped_field_superposition(
             rp, scenario, spot_um, grid_x, grid_y, n_frames=n_frames, stride=stride
         )
@@ -183,6 +232,7 @@ def export_scene(
             rp, scenario, spot_um, grid_x, grid_y, n_frames=n_frames, stride=stride
         )
     payload = {
+        "schema_version": schema_version,
         "scenario_id": str(scenario.scenario_id),
         "objective_version": scenario.objective_version,
         "roi_mm": [
@@ -201,14 +251,18 @@ def export_scene(
         "field": {
             "grid_x_mm": grid_x.round(4).tolist(),
             "grid_y_mm": grid_y.round(4).tolist(),
+            **({"grid_z_mm": grid_z_mm, "depth_mm": depth_mm} if grid_z_mm is not None else {}),
             "frames": frames,
             "liquidus_K": scenario.material.liquidus_K,
             "boiling_K": scenario.material.boiling_K,
+            "preheat_K": scenario.machine.preheat_K,
         },
         "meta": {
             "spot_um": spot_um,
             "n_frames": n_frames,
             "grid_n": grid_n,
+            "nz": nz if grid_z_mm is not None else None,
+            "depth_mm": depth_mm if grid_z_mm is not None else None,
             "stride": stride,
             "n_path_samples": rp.n_samples(),
             "transient_mode": transient_mode,

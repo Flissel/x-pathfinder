@@ -196,6 +196,10 @@ def create_app(
     def viewer():
         return send_from_directory(_THREE_JS_DIR, "index.html")
 
+    @app.route("/volume")
+    def volume_viewer():
+        return send_from_directory(_THREE_JS_DIR, "volume.html")
+
     @app.route("/live")
     def live():
         return send_from_directory(_THREE_JS_DIR, "live.html")

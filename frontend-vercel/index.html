@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>laser_sim · 3D LPBF live sim</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; padding: 0; background: #0a0a0a; color: #ddd;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    min-height: 100vh; }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 48px 28px; }
+  h1 { font-weight: 500; font-size: 28px; margin: 0 0 6px; }
+  .sub { color: #888; margin: 0 0 38px; font-size: 15px; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 3px;
+    background: #2a4d8a; color: white; font-size: 11px; margin-left: 8px;
+    text-transform: uppercase; letter-spacing: 0.04em; vertical-align: 4px; }
+  .grid { display: grid; gap: 22px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  .card { background: #121212; border: 1px solid #232323; border-radius: 8px;
+    padding: 20px 22px; display: flex; flex-direction: column; gap: 10px; }
+  .card h2 { font-weight: 500; font-size: 18px; margin: 0; color: #fff; }
+  .card p { color: #888; font-size: 14px; margin: 0; line-height: 1.5; }
+  .card .meta { color: #6cf; font-size: 12px; font-family: ui-monospace, Menlo, monospace; }
+  .card a.btn { background: #2a4d8a; color: white; padding: 8px 16px; border-radius: 4px;
+    text-decoration: none; font-size: 13px; align-self: flex-start; }
+  .card a.btn:hover { background: #355fa9; }
+  .scenes { background: #121212; border: 1px solid #232323; border-radius: 8px;
+    padding: 22px 26px; margin-top: 30px; }
+  .scene-row { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0 4px; }
+  .scene-row a { color: #6cf; padding: 6px 14px; border: 1px solid #2a4d8a;
+    border-radius: 4px; text-decoration: none; font-size: 13px;
+    font-family: ui-monospace, Menlo, monospace; }
+  .scene-row a:hover { background: #1a2540; }
+  pre { background: #0a0a0a; padding: 10px 14px; border-radius: 4px;
+    font-size: 12px; color: #9ad; overflow-x: auto; border: 1px solid #1a1a1a; }
+  footer { color: #555; font-size: 12px; margin-top: 50px; text-align: center; }
+  footer a { color: #888; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>laser_sim · volumetric LPBF live sim <span class="badge">vercel</span></h1>
+  <p class="sub">Three.js voxel point-cloud viewer for laser powder-bed-fusion scan patterns. Watch energy diffuse through Ti-6Al-4V substrate in 3D as the laser traces a path.</p>
+
+  <div class="grid">
+    <div class="card">
+      <h2>3D volume viewer</h2>
+      <p>True volumetric voxel cloud (Nx×Ny×Nz). Color = T<sub>max</sub>, alpha = above-melt opacity, additive blending for an emergent volume look. Play/pause, seek, T<sub>iso</sub> slider.</p>
+      <span class="meta">schema v2 · superposition_3d · 3D Green's function</span>
+      <a class="btn" href="volume.html?scene=/sample_scenes/voronoi.json">open voronoi</a>
+    </div>
+
+    <div class="card">
+      <h2>2.5D heightfield viewer</h2>
+      <p>Original viewer. Surface T<sub>max</sub> rendered as a vertex-displaced plane. Lower compute, smaller scene files. Schema v1 compatible.</p>
+      <span class="meta">schema v1 · superposition · z=0 surface</span>
+      <a class="btn" href="viewer.html?scene=/sample_scenes/voronoi.json">open</a>
+    </div>
+
+    <div class="card">
+      <h2>Live evolution dashboard</h2>
+      <p>SSE-streamed Pareto-front evolution from a running <code>cli evolve --serve</code> session. Needs your local Python server reachable via <code>?live=</code> URL.</p>
+      <span class="meta">requires local backend</span>
+      <a class="btn" href="live.html">open</a>
+    </div>
+  </div>
+
+  <div class="scenes">
+    <h2 style="font-weight:500;font-size:17px;margin:0 0 4px;">Sample scenes (3D volume)</h2>
+    <p style="color:#888;font-size:13px;margin:0;">Pre-computed by <code>cli viz3d --volume</code>. 24×24×12 voxels, 16 time-checkpoints, Ti-64.</p>
+    <div class="scene-row">
+      <a href="volume.html?scene=/sample_scenes/zigzag.json">zigzag</a>
+      <a href="volume.html?scene=/sample_scenes/hilbert.json">hilbert</a>
+      <a href="volume.html?scene=/sample_scenes/island.json">island</a>
+      <a href="volume.html?scene=/sample_scenes/voronoi.json">voronoi</a>
+    </div>
+  </div>
+
+  <div class="scenes">
+    <h2 style="font-weight:500;font-size:17px;margin:0 0 8px;">URL parameters</h2>
+    <pre>?scene=&lt;url&gt;          load a scene.json from a URL (default: /scene.json or sample)
+?live=&lt;sse-url&gt;       subscribe to SSE volume_frame stream (e.g. http://127.0.0.1:8765/api/stream)
+?t_iso=&lt;0..1&gt;         filter voxels above this fraction of (vmax-vmin), default 0
+?point=&lt;px&gt;           base point sprite size, default 14</pre>
+  </div>
+
+  <div class="scenes">
+    <h2 style="font-weight:500;font-size:17px;margin:0 0 8px;">Live with local backend</h2>
+    <pre># 1) run the EA + sim-live server locally
+python -m laser_sim sim-live --primitive zigzag --grid-n 24 --nz 12 --port 8765
+
+# 2) tunnel it (cloudflared / ngrok)
+cloudflared tunnel --url http://localhost:8765
+
+# 3) open this Vercel deployment with the live URL
+https://&lt;deploy&gt;/volume.html?live=https://&lt;tunnel&gt;/api/stream</pre>
+  </div>
+
+  <footer>
+    laser_sim · <a href="https://github.com/Flissel/x-pathfinder">github.com/Flissel/x-pathfinder</a>
+  </footer>
+</div>
+</body>
+</html>
