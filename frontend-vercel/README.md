@@ -37,7 +37,7 @@ bash ../tools/build_vercel.sh
 ```
 
 Runs `python -m laser_sim viz3d --volume` for four representative scan patterns
-and writes them into `public/sample_scenes/`. Re-run whenever the physics or
+and writes them into `sample_scenes/`. Re-run whenever the physics or
 the scene-export schema changes.
 
 ## URL parameters (volume.html)

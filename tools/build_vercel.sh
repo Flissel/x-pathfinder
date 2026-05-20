@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="$ROOT/frontend-vercel/public/sample_scenes"
+OUT="$ROOT/frontend-vercel/sample_scenes"
 mkdir -p "$OUT"
 
 run() {
