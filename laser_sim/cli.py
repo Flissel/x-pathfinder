@@ -830,6 +830,182 @@ def serve_cmd(
     _serve(db_path=db_path, scene_json=scene, host=host, port=port, debug=False)
 
 
+@app.command("sim-live")
+def sim_live(
+    primitive: str = typer.Option("zigzag", "--primitive"),
+    power: float = typer.Option(220.0, "--power", help="W"),
+    speed: float = typer.Option(1000.0, "--speed", help="mm/s"),
+    hatch: float = typer.Option(100.0, "--hatch", help="um"),
+    spot: float = typer.Option(80.0, "--spot", help="um"),
+    rotation: float = typer.Option(0.0, "--rotation", help="deg"),
+    scenario: Path = typer.Option(None, "--scenario"),
+    grid_n: int = typer.Option(24, "--grid-n", help="x/y voxel resolution"),
+    nz: int = typer.Option(12, "--nz", help="z (depth) voxel resolution"),
+    depth_mm: float = typer.Option(0.4, "--depth", help="bed depth in mm"),
+    frames: int = typer.Option(60, "--frames", help="time checkpoints to stream"),
+    stride: int = typer.Option(6, "--stride", help="path subsampling"),
+    fps: float = typer.Option(8.0, "--fps", help="frames published per second"),
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8765, "--port"),
+    loop: bool = typer.Option(True, "--loop/--no-loop", help="restart the scan when finished"),
+) -> None:
+    """Stream a live volumetric simulation over SSE to the 3D voxel viewer.
+
+    Runs the Flask server (with /volume + /api/stream) in a background thread,
+    then computes the cumulative 3D temperature volume at successive time
+    checkpoints and publishes each as a VOLUME_FRAME event. Open the viewer at
+    http://<host>:<port>/volume?live=/api/stream to watch the laser trace the
+    path and the energy diffuse into the substrate in real time.
+    """
+    import threading
+    import time as _time
+
+    from laser_sim.control_plane.events import (
+        EventBus,
+        EventType,
+        EvolutionEvent,
+        pack_volume_frame,
+    )
+    from laser_sim.patterns.base import RasterizedPath
+    from laser_sim.patterns.rasterize import rasterize_pattern
+    from laser_sim.physics.fast_sim import t_max_volume_superposition
+    from laser_sim.visualization.web_app import serve as _serve
+
+    sc = _load_scenario(scenario)
+    try:
+        kind = PrimitiveKind(primitive)
+    except ValueError:
+        _console.print(f"[red]unknown primitive[/red]: {primitive}")
+        raise typer.Exit(code=2)
+    spec = PrimitiveSpec(
+        kind=kind, power_W=power, speed_mm_s=speed,
+        hatch_um=hatch, spot_um=spot, rotation_deg=rotation,
+    )
+    pat = build_primitive(spec, sc.roi)
+    rp = rasterize_pattern(pat, ds_mm=0.05)
+    scan_s = pat.total_time_s()
+    if rp.n_samples() < 2:
+        _console.print("[red]pattern rasterized to <2 samples[/red]")
+        raise typer.Exit(code=2)
+
+    # session-fixed colour range so frames don't flicker
+    vmin_K = float(sc.machine.preheat_K)
+    vmax_K = float(2.0 * sc.material.boiling_K)
+
+    event_bus = EventBus()
+    server_thread = threading.Thread(
+        target=_serve,
+        kwargs=dict(
+            db_path=Path("laser_sim_campaigns.db"),
+            event_bus=event_bus,
+            host=host,
+            port=port,
+            debug=False,
+        ),
+        daemon=True,
+    )
+    server_thread.start()
+    _time.sleep(1.2)
+    _console.print(
+        f"[bold magenta]sim-live[/bold magenta] {kind.value} "
+        f"P={power:.0f}W v={speed:.0f}mm/s · {grid_n}²×{nz} voxels · "
+        f"{frames} frames · scan {scan_s*1e3:.0f}ms"
+    )
+    _console.print(
+        f"[bold]open[/bold] http://{host}:{port}/volume?live=/api/stream  (Ctrl+C to stop)"
+    )
+
+    event_bus.publish(
+        EvolutionEvent(
+            type=EventType.CAMPAIGN_START,
+            payload={
+                "kind": "sim-live",
+                "primitive": kind.value,
+                "grid": [grid_n, grid_n, nz],
+                "depth_mm": depth_mm,
+                "n_frames": frames,
+                "scan_s": scan_s,
+            },
+        )
+    )
+
+    t0, t1 = float(rp.t_s.min()), float(rp.t_s.max())
+    tail = max((t1 - t0) * 0.15, 1e-3)
+    checkpoints = np.linspace(t0 + 1e-5, t1 + tail, frames)
+    period = 1.0 / max(fps, 0.5)
+
+    def _laser_xy_at(t_s: float) -> tuple[float, float]:
+        idx = int(np.searchsorted(rp.t_s, t_s))
+        idx = max(0, min(idx, rp.n_samples() - 1))
+        return float(rp.x_mm[idx]), float(rp.y_mm[idx])
+
+    def _truncate_path(t_cutoff: float) -> RasterizedPath:
+        """Path containing only samples already fired by time t_cutoff —
+        so each frame shows the cumulative heat build-up, not the full scan."""
+        m = rp.t_s <= t_cutoff
+        if m.sum() < 2:
+            m = np.zeros_like(m)
+            m[:2] = True
+        return RasterizedPath(
+            x_mm=rp.x_mm[m],
+            y_mm=rp.y_mm[m],
+            t_s=rp.t_s[m],
+            power_W=rp.power_W[m],
+            speed_mm_s=rp.speed_mm_s[m],
+            laser_on=rp.laser_on[m],
+        )
+
+    try:
+        sweep = 0
+        while True:
+            for fi, tj in enumerate(checkpoints):
+                # cumulative volume from only the pulses fired up to tj
+                vol = t_max_volume_superposition(
+                    _truncate_path(float(tj)),
+                    sc.roi,
+                    sc.material,
+                    sc.machine,
+                    spot_um=spot,
+                    nx=grid_n, ny=grid_n, nz=nz,
+                    depth_mm=depth_mm,
+                    stride=stride,
+                    n_time_checkpoints=1,
+                    return_frames=False,
+                )
+                lx, ly = _laser_xy_at(float(tj))
+                payload = pack_volume_frame(
+                    vol.t_max_K,
+                    vmin_K=vmin_K,
+                    vmax_K=vmax_K,
+                    t_s=float(tj),
+                    laser_x_mm=lx,
+                    laser_y_mm=ly,
+                    frame_index=fi,
+                    n_frames=frames,
+                )
+                event_bus.publish(
+                    EvolutionEvent(type=EventType.VOLUME_FRAME, payload=payload)
+                )
+                _console.print(
+                    f"  frame {fi+1:3d}/{frames}  t={tj*1e3:6.1f}ms  "
+                    f"laser=({lx:+.2f},{ly:+.2f})  subs={event_bus.subscriber_count}",
+                    end="\r",
+                )
+                _time.sleep(period)
+            sweep += 1
+            if not loop:
+                break
+            _console.print(f"\n[dim]sweep {sweep} done — restarting (--no-loop to stop)[/dim]")
+        event_bus.publish(
+            EvolutionEvent(type=EventType.CAMPAIGN_END, payload={"sweeps": sweep})
+        )
+        _console.print("\n[green]sim-live finished[/green] — server still up, Ctrl+C to exit")
+        while True:
+            _time.sleep(3600)
+    except KeyboardInterrupt:
+        _console.print("\n[bold]sim-live stopped[/bold]")
+
+
 @app.command("history")
 def history(
     db_path: Path = typer.Option(Path("laser_sim_campaigns.db"), "--db"),

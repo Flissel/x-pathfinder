@@ -249,9 +249,14 @@ def t_max_volume_superposition(
 
     t0, t1 = float(pt[0]), float(pt[-1])
     tail = max((t1 - t0) * 0.15, 1e-3)
-    checkpoints = np.linspace(
-        t0 + 1e-5, t1 + tail, max(n_time_checkpoints, 1)
-    )
+    n_cp = max(n_time_checkpoints, 1)
+    if n_cp == 1:
+        # single checkpoint: evaluate at the END of the scan, where the
+        # cumulative deposited energy is at its peak (np.linspace(a, b, 1)
+        # would otherwise pick the START — only the first pulse fired).
+        checkpoints = np.array([t1 + tail])
+    else:
+        checkpoints = np.linspace(t0 + 1e-5, t1 + tail, n_cp)
 
     T_max = np.full((nx, ny, nz), preheat, dtype=float)
     frames: list = []
