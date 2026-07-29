@@ -915,6 +915,12 @@ def sim_live(
         f"[bold]open[/bold] http://{host}:{port}/volume?live=/api/stream  (Ctrl+C to stop)"
     )
 
+    # explicit grid-in-mm — the viewer uses these to place voxels in real
+    # machine coordinates instead of falling back to a synthetic unit cube.
+    grid_x_mm = np.linspace(sc.roi.x0_mm, sc.roi.x1_mm, grid_n).round(4).tolist()
+    grid_y_mm = np.linspace(sc.roi.y0_mm, sc.roi.y1_mm, grid_n).round(4).tolist()
+    grid_z_mm = np.linspace(0.0, depth_mm, nz).round(4).tolist()
+
     event_bus.publish(
         EvolutionEvent(
             type=EventType.CAMPAIGN_START,
@@ -922,9 +928,22 @@ def sim_live(
                 "kind": "sim-live",
                 "primitive": kind.value,
                 "grid": [grid_n, grid_n, nz],
+                "grid_x_mm": grid_x_mm,
+                "grid_y_mm": grid_y_mm,
+                "grid_z_mm": grid_z_mm,
                 "depth_mm": depth_mm,
+                "roi_mm": [sc.roi.x0_mm, sc.roi.y0_mm, sc.roi.x1_mm, sc.roi.y1_mm],
+                "liquidus_K": sc.material.liquidus_K,
+                "boiling_K": sc.material.boiling_K,
+                "preheat_K": sc.machine.preheat_K,
                 "n_frames": frames,
                 "scan_s": scan_s,
+                "path": {
+                    "x_mm": rp.x_mm.round(4).tolist(),
+                    "y_mm": rp.y_mm.round(4).tolist(),
+                    "t_s": rp.t_s.round(6).tolist(),
+                    "power_W": rp.power_W.round(2).tolist(),
+                },
             },
         )
     )
@@ -982,6 +1001,8 @@ def sim_live(
                     laser_y_mm=ly,
                     frame_index=fi,
                     n_frames=frames,
+                    roi_mm=(sc.roi.x0_mm, sc.roi.y0_mm, sc.roi.x1_mm, sc.roi.y1_mm),
+                    depth_mm=depth_mm,
                 )
                 event_bus.publish(
                     EvolutionEvent(type=EventType.VOLUME_FRAME, payload=payload)

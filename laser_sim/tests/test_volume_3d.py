@@ -158,3 +158,101 @@ def test_pack_volume_frame_rejects_non_3d():
 
 def test_event_type_volume_frame_exists():
     assert EventType.VOLUME_FRAME.value == "volume_frame"
+
+
+def test_pack_volume_frame_optional_grid_metadata():
+    """VOLUME_FRAME should carry roi_mm + depth_mm as fallback when the
+    caller provides them (for late SSE subscribers who missed campaign_start)."""
+    T = np.full((4, 4, 3), 500.0)
+    p = pack_volume_frame(
+        T, vmin_K=298, vmax_K=3500, t_s=0.01,
+        laser_x_mm=0.0, laser_y_mm=0.0, frame_index=0, n_frames=1,
+        roi_mm=(-2.5, -2.5, 2.5, 2.5), depth_mm=0.4,
+    )
+    assert p["roi_mm"] == [-2.5, -2.5, 2.5, 2.5]
+    assert p["depth_mm"] == pytest.approx(0.4)
+    # metadata is optional — omitting the kwargs must not add the keys
+    p2 = pack_volume_frame(
+        T, vmin_K=298, vmax_K=3500, t_s=0.01,
+        laser_x_mm=0.0, laser_y_mm=0.0, frame_index=0, n_frames=1,
+    )
+    assert "roi_mm" not in p2
+    assert "depth_mm" not in p2
+
+
+def test_sim_live_campaign_start_carries_grid_metadata(scenario, tmp_path, monkeypatch):
+    """Invoke the sim-live handler in-process (skip Flask/threads) and confirm
+    the CAMPAIGN_START event payload contains grid_x_mm/grid_y_mm/grid_z_mm +
+    roi_mm + preheat/liquidus/boiling so the browser viewer can place voxels
+    in real mm coordinates without falling back to a synthetic unit cube."""
+    import threading
+    import laser_sim.cli as cli_mod
+    from laser_sim.control_plane.events import EventBus, EventType
+
+    captured: list = []
+
+    class _FakeBus(EventBus):
+        def publish(self, ev):
+            captured.append(ev)
+
+    # patch typer's helpers we don't need + intercept EventBus + the
+    # serve function so sim-live doesn't bind a port or loop forever.
+    monkeypatch.setattr(cli_mod, "_console", type("C", (), {"print": lambda *a, **kw: None})())
+    stop = threading.Event()
+
+    class _DoneLoop(Exception):
+        pass
+
+    call_state = {"first": True}
+
+    def _fake_sleep(seconds):
+        # let the very first sleep (server bind wait) succeed, then abort on the
+        # first per-frame sleep so we only produce one frame before exiting
+        if call_state["first"]:
+            call_state["first"] = False
+            return
+        stop.set()
+        raise _DoneLoop()
+
+    monkeypatch.setattr("time.sleep", _fake_sleep)
+    monkeypatch.setattr("laser_sim.control_plane.events.EventBus", _FakeBus)
+
+    # neuter Flask server
+    def _fake_serve(**kw):
+        stop.wait()  # would normally block forever
+
+    monkeypatch.setattr("laser_sim.visualization.web_app.serve", _fake_serve)
+
+    try:
+        cli_mod.sim_live(
+            primitive="zigzag", power=220.0, speed=1000.0, hatch=100.0, spot=80.0,
+            rotation=0.0, scenario=None, grid_n=16, nz=8, depth_mm=0.3,
+            frames=3, stride=8, fps=100.0, host="127.0.0.1", port=0,
+            loop=False,
+        )
+    except _DoneLoop:
+        pass
+    except SystemExit:
+        pass  # typer.Exit for the "server keeps running" while True
+
+    starts = [e for e in captured if e.type is EventType.CAMPAIGN_START]
+    assert starts, "no CAMPAIGN_START event was published"
+    p = starts[0].payload
+    for key in ("grid_x_mm", "grid_y_mm", "grid_z_mm",
+                "roi_mm", "preheat_K", "liquidus_K", "boiling_K"):
+        assert key in p, f"CAMPAIGN_START missing {key}"
+    assert len(p["grid_x_mm"]) == 16
+    assert len(p["grid_z_mm"]) == 8
+    assert p["grid_z_mm"][0] == pytest.approx(0.0)
+    assert p["grid_z_mm"][-1] == pytest.approx(0.3)
+    # roi matches the scenario ROI
+    assert p["roi_mm"][0] == scenario.roi.x0_mm
+    assert p["roi_mm"][2] == scenario.roi.x1_mm
+
+    # at least one VOLUME_FRAME was published with the same shape and
+    # fallback metadata
+    volumes = [e for e in captured if e.type is EventType.VOLUME_FRAME]
+    assert volumes, "no VOLUME_FRAME published"
+    vp = volumes[0].payload
+    assert vp["shape"] == [16, 16, 8]
+    assert "roi_mm" in vp and "depth_mm" in vp

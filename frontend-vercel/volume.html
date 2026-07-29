@@ -377,9 +377,35 @@ function startLive(sseUrl) {
     `<div><span class="k">connecting to</span> <span class="v">${sseUrl}</span></div>`;
   const es = new EventSource(sseUrl);
   let gridReady = false;
+
+  function ingestGridMeta(meta) {
+    if (gridReady) return;
+    // meta must have grid_x_mm / grid_y_mm / grid_z_mm arrays
+    const gx = meta.grid_x_mm, gy = meta.grid_y_mm, gz = meta.grid_z_mm;
+    if (!gx || !gy || !gz) return;
+    GRID = buildGrid(gx, gy, gz);
+    createVoxelPoints(GRID);
+    setupCameraForGrid(GRID);
+    if (meta.path && meta.path.x_mm) {
+      pathArrays = {
+        x: meta.path.x_mm, y: meta.path.y_mm,
+        t: meta.path.t_s, P: meta.path.power_W,
+      };
+      // rebuild the path polyline now that we know the real coords
+      setupPathAndLaser(Math.max(gx[gx.length - 1] - gx[0], gy[gy.length - 1] - gy[0]));
+    }
+    if (meta.liquidus_K) liquidusK = meta.liquidus_K;
+    if (meta.boiling_K)  boilingK  = meta.boiling_K;
+    if (meta.preheat_K)  preheatK  = meta.preheat_K;
+    gridReady = true;
+    document.getElementById('meta').innerHTML =
+      `<div><span class="k">live SSE</span> · grid <span class="v">${gx.length}×${gy.length}×${gz.length}</span> ` +
+      `mm · roi ${meta.roi_mm ? meta.roi_mm.map(v => v.toFixed(1)).join('/') : '—'}</div>`;
+  }
+
   es.onopen = () => {
     document.getElementById('meta').innerHTML =
-      `<div><span class="k">live SSE</span> <span class="v">${sseUrl}</span> · waiting for volume_frame…</div>`;
+      `<div><span class="k">live SSE</span> <span class="v">${sseUrl}</span> · waiting for meta / volume_frame…</div>`;
   };
   es.onerror = () => {
     document.getElementById('meta').innerHTML += `<div style="color:#f99;">stream error — reconnecting…</div>`;
@@ -387,21 +413,25 @@ function startLive(sseUrl) {
   es.onmessage = (e) => {
     let evObj;
     try { evObj = JSON.parse(e.data); } catch { return; }
+    if (evObj.type === 'campaign_start') {
+      ingestGridMeta(evObj.payload || {});
+      return;
+    }
     if (evObj.type !== 'volume_frame') return;
     const payload = evObj.payload;
     const [Nx, Ny, Nz] = payload.shape;
     if (!gridReady) {
-      // grid must come from a separate channel or implicit; use a unit cube
-      // for first version, but better: a sidecar request to /api/scene-meta.
-      // Here: derive a synthetic unit grid centered on (laser_x, laser_y)
-      // until the server publishes a CAMPAIGN_START with field metadata.
-      const gx = Array.from({length: Nx}, (_,i) => -1 + (2 * i / (Nx - 1)));
-      const gy = Array.from({length: Ny}, (_,i) => -1 + (2 * i / (Ny - 1)));
-      const gz = Array.from({length: Nz}, (_,i) => 0.4 * i / (Nz - 1));
-      GRID = buildGrid(gx, gy, gz);
-      createVoxelPoints(GRID);
-      setupCameraForGrid(GRID);
-      gridReady = true;
+      // late subscriber: derive a synthetic mm grid centered on (0, 0) as
+      // a last-resort fallback — user should re-open after CAMPAIGN_START
+      const roi = payload.roi_mm || [-1, -1, 1, 1];
+      const depth = payload.depth_mm || 0.4;
+      const gx = Array.from({length: Nx}, (_,i) => roi[0] + (roi[2] - roi[0]) * i / (Nx - 1));
+      const gy = Array.from({length: Ny}, (_,i) => roi[1] + (roi[3] - roi[1]) * i / (Ny - 1));
+      const gz = Array.from({length: Nz}, (_,i) => depth * i / (Nz - 1));
+      ingestGridMeta({
+        grid_x_mm: gx, grid_y_mm: gy, grid_z_mm: gz,
+        roi_mm: roi, liquidus_K: liquidusK, boiling_K: boilingK, preheat_K: preheatK,
+      });
     }
     vmin = payload.vmin_K;
     vmax = payload.vmax_K;

@@ -93,6 +93,8 @@ def pack_volume_frame(
     laser_y_mm: float,
     frame_index: int,
     n_frames: int,
+    roi_mm: tuple[float, float, float, float] | None = None,
+    depth_mm: float | None = None,
 ) -> dict:
     """Quantize a (Nx, Ny, Nz) T_max volume to uint8 + base64 for SSE wire.
 
@@ -108,7 +110,7 @@ def pack_volume_frame(
     span = max(vmax_K - vmin_K, 1e-6)
     q = np.clip((t_max_K - vmin_K) / span, 0.0, 1.0)
     u8 = (q * 255.0 + 0.5).astype(np.uint8)
-    return {
+    payload = {
         "frame_index": int(frame_index),
         "n_frames": int(n_frames),
         "t_s": float(t_s),
@@ -120,3 +122,9 @@ def pack_volume_frame(
         "vmax_K": float(vmax_K),
         "data_b64": base64.b64encode(u8.tobytes()).decode("ascii"),
     }
+    # optional fallback metadata for late subscribers who missed campaign_start
+    if roi_mm is not None:
+        payload["roi_mm"] = [float(v) for v in roi_mm]
+    if depth_mm is not None:
+        payload["depth_mm"] = float(depth_mm)
+    return payload
