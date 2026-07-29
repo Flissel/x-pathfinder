@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>laser_sim · live evolution</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a;
+    color: #ddd; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px; }
+  #app { display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+  #side { padding: 16px; border-right: 1px solid #222; background: #0e0e0e;
+    overflow-y: auto; }
+  #main { padding: 16px; overflow-y: auto; }
+  h1 { font-size: 16px; font-weight: 500; margin: 0 0 8px; }
+  h2 { font-size: 13px; font-weight: 500; color: #9ad; margin: 18px 0 6px;
+       letter-spacing: 0.04em; text-transform: uppercase; }
+  .meta { font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    line-height: 1.7; font-size: 13px; }
+  .meta .k { color: #9ad; }
+  .meta .v { color: #fff; }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 3px;
+    background: #2a4d8a; color: white; font-size: 11px; margin-left: 6px; }
+  .badge.idle { background: #444; }
+  .badge.live { background: #2d8a4d; }
+  .badge.error { background: #8a2d2d; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+  th, td { padding: 4px 8px; text-align: right; border-bottom: 1px solid #222; }
+  th { color: #9ad; text-align: center; }
+  td.kind { text-align: left; color: #fff; }
+  svg { display: block; background: #111; border-radius: 4px; }
+  .progress { background: #222; height: 6px; border-radius: 3px; overflow: hidden;
+    margin: 6px 0 12px; }
+  .progress > div { background: linear-gradient(90deg, #2a4d8a, #6cf);
+    height: 100%; transition: width 200ms ease; }
+  #log { font-size: 11px; font-family: ui-monospace, Menlo, monospace;
+    color: #888; line-height: 1.4; max-height: 200px; overflow-y: auto;
+    background: #0a0a0a; padding: 6px; border-radius: 4px; }
+  .row { display: flex; gap: 16px; }
+  .panel { background: #111; padding: 12px 14px; border-radius: 6px;
+    margin-bottom: 14px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>laser_sim · live</h1>
+    <div>status <span class="badge idle" id="status">connecting…</span></div>
+    <div class="progress"><div id="progress" style="width: 0%"></div></div>
+    <h2>Campaign</h2>
+    <div class="meta" id="campaign-info">
+      <div><span class="k">waiting for events…</span></div>
+    </div>
+    <h2>Best chromosome</h2>
+    <div class="meta" id="best">—</div>
+    <h2>Log</h2>
+    <div id="log"></div>
+  </div>
+  <div id="main">
+    <div class="panel">
+      <h2 style="margin-top:0;">Pareto fitness over generations</h2>
+      <svg id="trend" width="100%" height="220" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Pareto archive size + HV2D</h2>
+      <svg id="hv" width="100%" height="180" preserveAspectRatio="none"></svg>
+    </div>
+    <div class="panel">
+      <h2 style="margin-top:0;">Best fitness vector (radar)</h2>
+      <svg id="radar" width="100%" height="280" viewBox="0 0 300 280"></svg>
+    </div>
+  </div>
+</div>
+
+<script>
+const trends = []; // {gen, best, median}
+const hvSeries = []; // {gen, archive, hv}
+let lastBest = null;
+let totalGens = null;
+let inFlight = false;
+
+function status(text, cls) {
+  const el = document.getElementById('status');
+  el.textContent = text;
+  el.className = 'badge ' + (cls || 'idle');
+}
+
+function log(line) {
+  const l = document.getElementById('log');
+  const div = document.createElement('div');
+  div.textContent = line;
+  l.appendChild(div);
+  l.scrollTop = l.scrollHeight;
+}
+
+function renderTrend() {
+  if (!trends.length) return;
+  const svg = document.getElementById('trend');
+  const W = svg.clientWidth || 800;
+  const H = 220;
+  const pad = 30;
+  const xs = trends.map(d => d.gen);
+  const ys = trends.flatMap(d => [d.best, d.median]);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const yMin = Math.min(...ys) * 0.95, yMax = Math.max(...ys) * 1.05;
+  function X(g) { return pad + (g - xMin) / Math.max(xMax - xMin, 1) * (W - 2 * pad); }
+  function Y(j) { return H - pad - (j - yMin) / Math.max(yMax - yMin, 1e-9) * (H - 2 * pad); }
+  let bestPath = '', medPath = '';
+  trends.forEach((d, i) => {
+    bestPath += (i ? 'L' : 'M') + X(d.gen) + ',' + Y(d.best) + ' ';
+    medPath += (i ? 'L' : 'M') + X(d.gen) + ',' + Y(d.median) + ' ';
+  });
+  svg.innerHTML = `
+    <rect x="0" y="0" width="${W}" height="${H}" fill="#111"/>
+    <path d="${medPath}" stroke="#777" stroke-width="1.5" fill="none"/>
+    <path d="${bestPath}" stroke="#6cf" stroke-width="2.5" fill="none"/>
+    <text x="${W - 8}" y="14" fill="#6cf" text-anchor="end" font-size="11">best J</text>
+    <text x="${W - 8}" y="28" fill="#777" text-anchor="end" font-size="11">median J</text>
+    <text x="6" y="${H - 8}" fill="#888" font-size="10">gen ${xMin}…${xMax}</text>
+    <text x="6" y="14" fill="#888" font-size="10">J: ${yMin.toFixed(3)}…${yMax.toFixed(3)}</text>
+  `;
+}
+
+function renderHV() {
+  if (!hvSeries.length) return;
+  const svg = document.getElementById('hv');
+  const W = svg.clientWidth || 800;
+  const H = 180;
+  const pad = 30;
+  const xs = hvSeries.map(d => d.gen);
+  const xMin = Math.min(...xs), xMax = Math.max(...xs);
+  const aMax = Math.max(...hvSeries.map(d => d.archive));
+  const hMax = Math.max(...hvSeries.map(d => d.hv));
+  function X(g) { return pad + (g - xMin) / Math.max(xMax - xMin, 1) * (W - 2 * pad); }
+  let bars = '';
+  hvSeries.forEach(d => {
+    const h = (d.archive / Math.max(aMax, 1)) * (H - 2 * pad);
+    const x = X(d.gen) - 6;
+    bars += `<rect x="${x}" y="${H - pad - h}" width="12" height="${h}" fill="#2a4d8a"/>`;
+  });
+  let hvPath = '';
+  hvSeries.forEach((d, i) => {
+    const yv = H - pad - (d.hv / Math.max(hMax, 1e-9)) * (H - 2 * pad);
+    hvPath += (i ? 'L' : 'M') + X(d.gen) + ',' + yv + ' ';
+  });
+  svg.innerHTML = `
+    <rect x="0" y="0" width="${W}" height="${H}" fill="#111"/>
+    ${bars}
+    <path d="${hvPath}" stroke="#fc6" stroke-width="2" fill="none"/>
+    <text x="${W - 8}" y="14" fill="#2a4d8a" text-anchor="end" font-size="11">archive size</text>
+    <text x="${W - 8}" y="28" fill="#fc6" text-anchor="end" font-size="11">HV2D (key vs t_cycle)</text>
+  `;
+}
+
+function renderRadar(fitness) {
+  if (!fitness) return;
+  const svg = document.getElementById('radar');
+  const labels = ['U_temp', 'P_LoF', 'P_keyhole', 'P_surface', 't_cycle'];
+  const cx = 150, cy = 130, R = 100;
+  const n = fitness.length;
+  // normalise t_cycle by max likely value
+  const norm = fitness.map((v, i) => i === 4 ? Math.min(1, v / 3.0) : Math.max(0, Math.min(1, v)));
+  let polyPoints = '';
+  let labelText = '';
+  for (let i = 0; i < n; i++) {
+    const ang = -Math.PI / 2 + i * (2 * Math.PI / n);
+    const r = R * norm[i];
+    const x = cx + Math.cos(ang) * r;
+    const y = cy + Math.sin(ang) * r;
+    polyPoints += `${x},${y} `;
+    const lx = cx + Math.cos(ang) * (R + 18);
+    const ly = cy + Math.sin(ang) * (R + 18) + 4;
+    labelText += `<text x="${lx}" y="${ly}" fill="#9ad" font-size="11" text-anchor="middle">${labels[i]}</text>`;
+    labelText += `<text x="${lx}" y="${ly + 12}" fill="#fff" font-size="10" text-anchor="middle">${fitness[i].toFixed(3)}</text>`;
+  }
+  let grid = '';
+  for (const f of [0.25, 0.5, 0.75, 1.0]) {
+    let pts = '';
+    for (let i = 0; i < n; i++) {
+      const ang = -Math.PI / 2 + i * (2 * Math.PI / n);
+      pts += `${cx + Math.cos(ang) * R * f},${cy + Math.sin(ang) * R * f} `;
+    }
+    grid += `<polygon points="${pts}" fill="none" stroke="#333" stroke-width="0.5"/>`;
+  }
+  svg.innerHTML = `
+    <rect width="300" height="280" fill="#111"/>
+    ${grid}
+    <polygon points="${polyPoints}" fill="rgba(108,204,255,0.25)" stroke="#6cf" stroke-width="2"/>
+    ${labelText}
+  `;
+}
+
+function onEvent(ev) {
+  switch (ev.type) {
+    case 'campaign_start':
+      log(`[start] pop=${ev.payload.population} gens=${ev.payload.generations} seed=${ev.payload.seed}`);
+      totalGens = ev.payload.generations;
+      document.getElementById('campaign-info').innerHTML =
+        `<div><span class="k">material</span> <span class="v">${ev.payload.scenario_material}</span></div>` +
+        `<div><span class="k">machine</span> <span class="v">${ev.payload.scenario_machine}</span></div>` +
+        `<div><span class="k">pop / gens</span> <span class="v">${ev.payload.population} × ${ev.payload.generations}</span></div>` +
+        `<div><span class="k">seed</span> <span class="v">${ev.payload.seed}</span></div>`;
+      status('running', 'live');
+      break;
+    case 'generation':
+      const p = ev.payload;
+      trends.push({ gen: p.generation, best: p.best_scalar_J, median: p.median_scalar_J });
+      hvSeries.push({ gen: p.generation, archive: p.archive_size, hv: p.hypervolume_2d });
+      renderTrend();
+      renderHV();
+      if (p.best) {
+        document.getElementById('best').innerHTML =
+          `<div><span class="k">kind</span> <span class="v">${p.best.kind}</span></div>` +
+          `<div><span class="k">power</span> <span class="v">${p.best.power_W.toFixed(1)} W</span></div>` +
+          `<div><span class="k">speed</span> <span class="v">${p.best.speed_mm_s.toFixed(1)} mm/s</span></div>` +
+          `<div><span class="k">hatch</span> <span class="v">${p.best.hatch_um.toFixed(1)} µm</span></div>` +
+          `<div><span class="k">spot</span> <span class="v">${p.best.spot_um.toFixed(1)} µm</span></div>` +
+          `<div><span class="k">scalar J</span> <span class="v">${p.best.scalar_J.toFixed(4)}</span></div>`;
+        renderRadar(p.best.fitness);
+      }
+      const pct = totalGens ? ((p.generation + 1) / totalGens) * 100 : 0;
+      document.getElementById('progress').style.width = pct.toFixed(1) + '%';
+      log(`gen ${p.generation}: best=${p.best_scalar_J.toFixed(4)} archive=${p.archive_size} ${p.crisis ? '(crisis)' : ''}`);
+      break;
+    case 'hf_promotion':
+      log(`[HF] gen ${ev.payload.generation}: promoted ${ev.payload.n}`);
+      break;
+    case 'campaign_end':
+      status('completed', 'idle');
+      log(`[end] generations=${ev.payload.generations_run} archive=${ev.payload.archive_size} best=${ev.payload.best_scalar_J?.toFixed(4) ?? '—'}`);
+      break;
+    case 'error':
+      status('error', 'error');
+      log(`[ERR] ${JSON.stringify(ev.payload)}`);
+      break;
+  }
+}
+
+function start() {
+  const es = new EventSource('/api/stream');
+  es.onopen = () => status('connected', 'idle');
+  es.onerror = () => status('reconnecting…', 'idle');
+  es.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      onEvent(ev);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+}
+start();
+</script>
+</body>
+</html>

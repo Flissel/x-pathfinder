@@ -1,0 +1,35 @@
+FoamFile { version 2.0; format ascii; class dictionary; object blockMeshDict; }
+
+scale 1;
+vertices
+(
+    ({{ bbox_x_min }} {{ bbox_y_min }} {{ bbox_z_min }})
+    ({{ bbox_x_max }} {{ bbox_y_min }} {{ bbox_z_min }})
+    ({{ bbox_x_max }} {{ bbox_y_max }} {{ bbox_z_min }})
+    ({{ bbox_x_min }} {{ bbox_y_max }} {{ bbox_z_min }})
+    ({{ bbox_x_min }} {{ bbox_y_min }} {{ bbox_z_max }})
+    ({{ bbox_x_max }} {{ bbox_y_min }} {{ bbox_z_max }})
+    ({{ bbox_x_max }} {{ bbox_y_max }} {{ bbox_z_max }})
+    ({{ bbox_x_min }} {{ bbox_y_max }} {{ bbox_z_max }})
+);
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) ({{ nx }} {{ ny }} {{ nz }}) simpleGrading (1 1 1)
+);
+boundary
+(
+    floor      { type wall; faces ((0 1 2 3)); }
+    top        { type patch; faces ((4 5 6 7)); }
+    sides
+    {
+        type patch;
+        faces
+        (
+            (0 1 5 4)
+            (1 2 6 5)
+            (2 3 7 6)
+            (3 0 4 7)
+        );
+    }
+);
+mergePatchPairs ();

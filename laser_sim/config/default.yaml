@@ -1,0 +1,65 @@
+# Default scenario: Ti-6Al-4V on a generic 280mm chamber, 30um layer.
+# Values are reasonable LPBF defaults; refine per actual machine/powder lot.
+objective_version: v1
+material:
+  material_id: ti64
+  name: "Ti-6Al-4V (Grade 23)"
+  rho_solid: 4430.0
+  rho_liquid: 4000.0
+  cp_solid: 560.0
+  cp_liquid: 830.0
+  k_solid: 7.0
+  k_liquid: 33.0
+  solidus_K: 1878.0
+  liquidus_K: 1928.0
+  latent_heat_fusion: 286000.0
+  latent_heat_vap: 8800000.0
+  boiling_K: 3315.0
+  emissivity: 0.4
+  absorptivity: 0.35
+powder:
+  powder_id: ti64-15-45
+  d10_um: 18.0
+  d50_um: 32.0
+  d90_um: 45.0
+  sphericity: 0.95
+  bulk_density_kg_m3: 2500.0
+machine:
+  machine_id: generic_280
+  vendor: generic
+  build_x_mm: 280.0
+  build_y_mm: 280.0
+  build_z_mm: 365.0
+  laser:
+    power_min_W: 60.0
+    power_max_W: 400.0
+    speed_min_mm_s: 100.0
+    speed_max_mm_s: 2000.0
+    spot_min_um: 50.0
+    spot_max_um: 150.0
+    beam_profile: gaussian
+    wavelength_nm: 1064.0
+  gas: argon
+  gas_flow_m_s: 2.0
+  chamber_o2_ppm: 100.0
+  preheat_K: 298.0
+  layer_thickness_um: 30.0
+roi:
+  roi_id: square_5mm
+  x0_mm: -2.5
+  y0_mm: -2.5
+  x1_mm: 2.5
+  y1_mm: 2.5
+  z_mm: 0.0
+  layers: 1
+ea:
+  population: 64
+  generations: 20
+  elitism: 4
+  tournament_k: 3
+  crossover_rate: 0.7
+  mutation_rate: 0.3
+fidelity:
+  fast_only_until_gen: 3
+  hf_promote_top_k: 5
+  hf_promote_pareto_front: true

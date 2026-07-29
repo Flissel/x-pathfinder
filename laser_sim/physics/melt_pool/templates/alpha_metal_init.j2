@@ -1,0 +1,13 @@
+FoamFile { version 2.0; format ascii; class volScalarField; object alpha.metal; }
+
+dimensions [0 0 0 0 0 0 0];
+internalField uniform 0;
+// IC: powder layer (alpha.metal = ~0.55 .. 0.60) up to z = layer_m;
+// the actual field is initialised by setFields using the powder bed
+// from physics/powder_bed (coupling/dem_to_cfd.py)
+boundaryField
+{
+    floor   { type zeroGradient; }
+    top     { type zeroGradient; }
+    sides   { type zeroGradient; }
+}

@@ -1,0 +1,39 @@
+FoamFile { version 2.0; format ascii; class dictionary; object fvSolution; }
+
+solvers
+{
+    "alpha.metal.*"
+    {
+        nAlphaCorr      2;
+        nAlphaSubCycles 2;
+        cAlpha          1;
+        MULESCorr       yes;
+        nLimiterIter    3;
+        solver          smoothSolver;
+        smoother        symGaussSeidel;
+        tolerance       1e-10;
+        relTol          0;
+    }
+    "(U|T)"
+    {
+        solver          PBiCGStab;
+        preconditioner  DILU;
+        tolerance       1e-8;
+        relTol          0;
+    }
+    "p_rgh.*"
+    {
+        solver          GAMG;
+        smoother        DIC;
+        tolerance       1e-9;
+        relTol          0.01;
+    }
+}
+
+PIMPLE
+{
+    momentumPredictor   yes;
+    nOuterCorrectors    2;
+    nCorrectors         2;
+    nNonOrthogonalCorrectors 0;
+}

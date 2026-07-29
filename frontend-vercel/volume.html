@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>laser_sim · volumetric live sim</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0a; color: #ddd;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; overflow: hidden; }
+  #scene { position: absolute; inset: 0; }
+  canvas { display: block; }
+  #panel { position: absolute; left: 14px; bottom: 14px; right: 14px;
+    background: rgba(15, 15, 15, 0.92); border: 1px solid #2a2a2a; border-radius: 6px;
+    padding: 10px 14px; display: flex; gap: 14px; align-items: center; font-size: 13px;
+    backdrop-filter: blur(8px); }
+  #panel .meta { font-family: ui-monospace, "SF Mono", Menlo, monospace; color: #9ad;
+    min-width: 270px; }
+  button { background: #2a4d8a; color: white; border: 0; padding: 6px 14px;
+    border-radius: 4px; cursor: pointer; font-size: 13px; }
+  button:hover { background: #355fa9; }
+  input[type=range] { flex: 1; min-width: 120px; accent-color: #6cf; }
+  #status { position: absolute; top: 14px; left: 14px;
+    background: rgba(0,0,0,0.6); padding: 10px 12px; border-radius: 5px;
+    font-size: 12px; max-width: 360px; }
+  #status h1 { margin: 0 0 6px; font-size: 14px; font-weight: 500; }
+  #legend { position: absolute; top: 14px; right: 14px;
+    background: rgba(0,0,0,0.6); padding: 10px 12px; border-radius: 5px;
+    font-size: 12px; min-width: 180px; }
+  .k { color: #9ad; } .v { color: #fff; }
+  .badge { display: inline-block; padding: 2px 7px; border-radius: 3px;
+    background: #444; color: white; font-size: 10px; margin-left: 4px;
+    text-transform: uppercase; letter-spacing: 0.04em; }
+  .badge.live { background: #2d8a4d; }
+  .badge.static { background: #2a4d8a; }
+  .row { display: flex; flex-direction: column; gap: 4px; }
+  .ctrl-row { display: flex; align-items: center; gap: 6px; }
+  .ctrl-row label { color: #888; font-size: 11px; min-width: 50px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/three.module.js",
+    "three/addons/": "./vendor/three/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+<div id="scene"></div>
+<div id="status">
+  <h1>laser_sim · volumetric live sim <span class="badge" id="mode-badge">init</span></h1>
+  <div id="meta">loading…</div>
+</div>
+<div id="legend">
+  <div><span class="k">color</span> → T<sub>max</sub> [K]</div>
+  <div><span class="k">alpha</span> → above melt</div>
+  <div><span class="k">red sphere</span> → laser head</div>
+  <div><span class="k">cyan line</span> → path</div>
+  <div id="legend-stats" style="margin-top:6px;color:#888;font-size:11px;"></div>
+</div>
+<div id="panel">
+  <div class="meta" id="time">t = 0.000 s · frame 0/0</div>
+  <button id="play">▶</button>
+  <button id="reset" title="reset playback">↺</button>
+  <div class="row" style="flex:1;">
+    <div class="ctrl-row">
+      <label>frame</label>
+      <input id="seek" type="range" min="0" max="100" value="0" />
+    </div>
+    <div class="ctrl-row">
+      <label>T<sub>iso</sub></label>
+      <input id="iso" type="range" min="0" max="1" step="0.01" value="0" />
+      <span id="iso-val" style="font-family:monospace;font-size:11px;color:#888;min-width:50px;">off</span>
+    </div>
+    <div class="ctrl-row">
+      <label>size</label>
+      <input id="psize" type="range" min="1" max="40" step="1" value="14" />
+      <span id="psize-val" style="font-family:monospace;font-size:11px;color:#888;min-width:30px;">14</span>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const params = new URLSearchParams(location.search);
+const sceneUrl = params.get('scene');
+const liveUrl = params.get('live');
+const initialIsoFrac = parseFloat(params.get('t_iso') || '0');
+const initialPointSize = parseFloat(params.get('point') || '14');
+
+let MODE = liveUrl ? 'live' : 'static';
+const modeBadge = document.getElementById('mode-badge');
+modeBadge.textContent = MODE;
+modeBadge.classList.add(MODE);
+
+// ====== Three.js setup ======
+const container = document.getElementById('scene');
+const W = window.innerWidth, H = window.innerHeight;
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setSize(W, H);
+container.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0a0a);
+
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.01, 1000);
+camera.position.set(4, -4, 3);
+camera.up.set(0, 0, 1);
+scene.add(camera);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+// ====== Voxel point cloud (shader material) ======
+const uniforms = {
+  uPointSize: { value: initialPointSize },
+  uIsoFrac: { value: initialIsoFrac },
+};
+
+const vertexShader = /* glsl */ `
+attribute vec3 vColor;
+attribute float aAlpha;
+attribute float aActive;
+uniform float uPointSize;
+uniform float uIsoFrac;
+varying vec3 vCol;
+varying float vAlpha;
+varying float vActive;
+void main() {
+  vCol = vColor;
+  vAlpha = aAlpha;
+  // also gate by iso threshold
+  vActive = aActive * step(uIsoFrac, aAlpha);
+  vec4 mv = modelViewMatrix * vec4(position, 1.0);
+  gl_PointSize = uPointSize * (300.0 / -mv.z);
+  gl_Position = projectionMatrix * mv;
+}`;
+const fragmentShader = /* glsl */ `
+precision mediump float;
+varying vec3 vCol;
+varying float vAlpha;
+varying float vActive;
+void main() {
+  if (vActive < 0.5) discard;
+  vec2 d = gl_PointCoord - vec2(0.5);
+  float r = length(d) * 2.0;
+  if (r > 1.0) discard;
+  float falloff = exp(-3.0 * r * r);
+  gl_FragColor = vec4(vCol, vAlpha * falloff);
+}`;
+
+const voxelMaterial = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader,
+  fragmentShader,
+  transparent: true,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
+let voxelGeom = null;
+let voxelPoints = null;
+
+// inferno-like colormap
+function inferno(t) {
+  t = Math.max(0, Math.min(1, t));
+  const r = Math.min(1, 1.5 * t + 0.05);
+  const g = Math.max(0, Math.min(1, Math.pow(t, 2.4) * 1.2 - 0.1));
+  const b = Math.max(0, 0.5 - 1.5 * Math.abs(t - 0.4)) + (t > 0.85 ? (t - 0.85) * 4 : 0);
+  return [r, g, b];
+}
+
+function tToAlpha(tFrac, meltFrac, boilFrac) {
+  // soft sigmoid: 0 below preheat, ramp 0..1 between liquidus..boiling, clamp
+  if (tFrac < 0.05) return 0;
+  if (tFrac < meltFrac) return 0.05 + 0.15 * (tFrac - 0.05) / (meltFrac - 0.05);
+  if (tFrac < boilFrac) return 0.2 + 0.8 * (tFrac - meltFrac) / (boilFrac - meltFrac);
+  return 1.0;
+}
+
+// ====== State ======
+let SCENE_DATA = null;          // static scene JSON
+let GRID = null;                // { Nx, Ny, Nz, x[], y[], z[], dim, extent }
+let FRAMES = [];                // [{ t_s, t_K (Float32Array length Nx*Ny*Nz, in K) }]
+let liquidusK = 1928, boilingK = 3315, preheatK = 298;
+let vmin = 298, vmax = 3500;
+let pathArrays = null;          // { x, y, t, P }
+let pathLine = null;
+let laserDot = null;
+let frameIdx = 0;
+let playing = false;
+let lastT = performance.now();
+let totalFrames = 0;
+
+function buildGrid(gx, gy, gz) {
+  const Nx = gx.length, Ny = gy.length, Nz = gz.length;
+  const positions = new Float32Array(Nx * Ny * Nz * 3);
+  const aActive = new Float32Array(Nx * Ny * Nz);
+  let p = 0, q = 0;
+  for (let i = 0; i < Nx; i++)
+    for (let j = 0; j < Ny; j++)
+      for (let k = 0; k < Nz; k++) {
+        positions[p++] = gx[i];
+        positions[p++] = gy[j];
+        // surface at z=0 in scene; +z up = into the material, render going downward
+        positions[p++] = -gz[k];
+        aActive[q++] = 1.0;
+      }
+  return { Nx, Ny, Nz, positions, aActive, gx, gy, gz };
+}
+
+function createVoxelPoints(grid) {
+  if (voxelPoints) {
+    scene.remove(voxelPoints);
+    voxelPoints.geometry.dispose();
+  }
+  const N = grid.Nx * grid.Ny * grid.Nz;
+  voxelGeom = new THREE.BufferGeometry();
+  voxelGeom.setAttribute('position', new THREE.BufferAttribute(grid.positions, 3));
+  voxelGeom.setAttribute('vColor', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+  voxelGeom.setAttribute('aAlpha', new THREE.BufferAttribute(new Float32Array(N), 1));
+  voxelGeom.setAttribute('aActive', new THREE.BufferAttribute(grid.aActive, 1));
+  voxelPoints = new THREE.Points(voxelGeom, voxelMaterial);
+  scene.add(voxelPoints);
+}
+
+function updateVoxelColors(tK) {
+  if (!voxelGeom) return;
+  const cAttr = voxelGeom.getAttribute('vColor');
+  const aAttr = voxelGeom.getAttribute('aAlpha');
+  const cArr = cAttr.array;
+  const aArr = aAttr.array;
+  const span = Math.max(vmax - vmin, 1e-6);
+  const meltFrac = (liquidusK - vmin) / span;
+  const boilFrac = (boilingK - vmin) / span;
+  const N = tK.length;
+  for (let n = 0; n < N; n++) {
+    const t = (tK[n] - vmin) / span;
+    const [r, g, b] = inferno(t);
+    cArr[n * 3] = r; cArr[n * 3 + 1] = g; cArr[n * 3 + 2] = b;
+    aArr[n] = tToAlpha(t, meltFrac, boilFrac);
+  }
+  cAttr.needsUpdate = true;
+  aAttr.needsUpdate = true;
+}
+
+function nestedToFlat(nested) {
+  const Nx = nested.length, Ny = nested[0].length, Nz = nested[0][0].length;
+  const arr = new Float32Array(Nx * Ny * Nz);
+  let p = 0;
+  for (let i = 0; i < Nx; i++)
+    for (let j = 0; j < Ny; j++)
+      for (let k = 0; k < Nz; k++) arr[p++] = nested[i][j][k];
+  return arr;
+}
+
+function setupPathAndLaser(extent) {
+  if (!pathArrays) return;
+  // path polyline at z=0
+  const segPositions = [];
+  for (let i = 0; i < pathArrays.x.length; i++) {
+    segPositions.push(pathArrays.x[i], pathArrays.y[i], 0.01);
+  }
+  if (pathLine) { scene.remove(pathLine); pathLine.geometry.dispose(); }
+  const pathGeom = new THREE.BufferGeometry();
+  pathGeom.setAttribute('position', new THREE.Float32BufferAttribute(segPositions, 3));
+  pathLine = new THREE.Line(pathGeom, new THREE.LineBasicMaterial({
+    color: 0x44d9ff, transparent: true, opacity: 0.55,
+  }));
+  scene.add(pathLine);
+  // laser head
+  if (laserDot) { scene.remove(laserDot); laserDot.geometry.dispose(); }
+  laserDot = new THREE.Mesh(
+    new THREE.SphereGeometry(extent * 0.025, 18, 14),
+    new THREE.MeshBasicMaterial({ color: 0xff3232 })
+  );
+  scene.add(laserDot);
+}
+
+function setLaserAt(t_s) {
+  if (!laserDot || !pathArrays) return;
+  let j = 0;
+  while (j < pathArrays.t.length - 1 && pathArrays.t[j] < t_s) j++;
+  laserDot.position.set(pathArrays.x[j], pathArrays.y[j], 0.05);
+}
+
+function setLaserAtXY(x, y) {
+  if (!laserDot) return;
+  laserDot.position.set(x, y, 0.05);
+}
+
+function renderFrame(idx) {
+  const f = FRAMES[idx];
+  if (!f) return;
+  updateVoxelColors(f.t_K);
+  document.getElementById('time').textContent =
+    `t = ${f.t_s.toFixed(4)} s · frame ${idx + 1}/${FRAMES.length}`;
+  document.getElementById('seek').value = String(idx);
+  if (pathArrays) setLaserAt(f.t_s);
+  else if (f.laser_x_mm != null) setLaserAtXY(f.laser_x_mm, f.laser_y_mm);
+  document.getElementById('legend-stats').innerHTML =
+    `<div>T<sub>max</sub>: ${Math.max(...f.t_K).toFixed(0)} K</div>` +
+    `<div>vmin/vmax: ${vmin.toFixed(0)} / ${vmax.toFixed(0)} K</div>`;
+}
+
+function setupCameraForGrid(grid) {
+  const cx = 0.5 * (grid.gx[0] + grid.gx[grid.Nx - 1]);
+  const cy = 0.5 * (grid.gy[0] + grid.gy[grid.Ny - 1]);
+  const extent = Math.max(grid.gx[grid.Nx - 1] - grid.gx[0], grid.gy[grid.Ny - 1] - grid.gy[0]);
+  controls.target.set(cx, cy, -grid.gz[grid.Nz - 1] / 2);
+  camera.position.set(cx + extent * 1.5, cy - extent * 1.5, extent * 1.2);
+  camera.lookAt(controls.target);
+  // grid helper on the surface
+  const gh = new THREE.GridHelper(extent * 1.4, 12, 0x333333, 0x222222);
+  gh.rotation.x = Math.PI / 2;
+  gh.position.set(cx, cy, 0.0);
+  scene.add(gh);
+  setupPathAndLaser(extent);
+  return extent;
+}
+
+// ====== Static (Vercel) mode: load scene.json v2 ======
+async function loadStaticScene(url) {
+  const r = await fetch(url, { cache: 'no-store' });
+  if (!r.ok) throw new Error(`fetch ${url} failed: ${r.status}`);
+  const data = await r.json();
+  SCENE_DATA = data;
+  if ((data.schema_version || 1) < 2 || !data.field.grid_z_mm) {
+    document.getElementById('meta').innerHTML =
+      `<span style="color:#f99;">scene is schema v${data.schema_version || 1} (2D heightfield)</span><br>` +
+      `re-export with <code>viz3d --volume</code> for the voxel viewer, or open ` +
+      `<a href="./viewer.html?scene=${encodeURIComponent(url)}" style="color:#6cf;">viewer.html</a>`;
+    return;
+  }
+  liquidusK = data.field.liquidus_K;
+  boilingK = data.field.boiling_K;
+  preheatK = data.field.preheat_K || 298;
+  // vmin/vmax: keep generous so colours stay consistent across frames
+  let gmax = 0;
+  for (const f of data.field.frames) {
+    for (const row of f.t_max_K)
+      for (const col of row)
+        for (const v of col) if (v > gmax) gmax = v;
+  }
+  vmin = preheatK;
+  vmax = Math.max(gmax, boilingK);
+
+  GRID = buildGrid(data.field.grid_x_mm, data.field.grid_y_mm, data.field.grid_z_mm);
+  createVoxelPoints(GRID);
+  setupCameraForGrid(GRID);
+
+  pathArrays = data.path;
+  FRAMES = data.field.frames.map(f => ({
+    t_s: f.t_s,
+    t_K: nestedToFlat(f.t_max_K),
+  }));
+  totalFrames = FRAMES.length;
+  document.getElementById('seek').max = String(totalFrames - 1);
+  document.getElementById('meta').innerHTML =
+    `<div><span class="k">scenario</span> <span class="v">${data.scenario_id?.slice(0, 8) ?? '—'}</span></div>` +
+    `<div><span class="k">grid</span> <span class="v">${GRID.Nx}×${GRID.Ny}×${GRID.Nz}</span> ` +
+    `<span class="k">frames</span> <span class="v">${FRAMES.length}</span></div>` +
+    `<div><span class="k">path</span> <span class="v">${pathArrays.x_mm.length} samples</span></div>`;
+  // path arrays in static scene use _mm suffix
+  pathArrays = {
+    x: data.path.x_mm,
+    y: data.path.y_mm,
+    t: data.path.t_s,
+    P: data.path.power_W,
+  };
+  renderFrame(0);
+}
+
+// ====== Live mode: SSE volume_frame stream ======
+function startLive(sseUrl) {
+  document.getElementById('meta').innerHTML =
+    `<div><span class="k">connecting to</span> <span class="v">${sseUrl}</span></div>`;
+  const es = new EventSource(sseUrl);
+  let gridReady = false;
+
+  function ingestGridMeta(meta) {
+    if (gridReady) return;
+    // meta must have grid_x_mm / grid_y_mm / grid_z_mm arrays
+    const gx = meta.grid_x_mm, gy = meta.grid_y_mm, gz = meta.grid_z_mm;
+    if (!gx || !gy || !gz) return;
+    GRID = buildGrid(gx, gy, gz);
+    createVoxelPoints(GRID);
+    setupCameraForGrid(GRID);
+    if (meta.path && meta.path.x_mm) {
+      pathArrays = {
+        x: meta.path.x_mm, y: meta.path.y_mm,
+        t: meta.path.t_s, P: meta.path.power_W,
+      };
+      // rebuild the path polyline now that we know the real coords
+      setupPathAndLaser(Math.max(gx[gx.length - 1] - gx[0], gy[gy.length - 1] - gy[0]));
+    }
+    if (meta.liquidus_K) liquidusK = meta.liquidus_K;
+    if (meta.boiling_K)  boilingK  = meta.boiling_K;
+    if (meta.preheat_K)  preheatK  = meta.preheat_K;
+    gridReady = true;
+    document.getElementById('meta').innerHTML =
+      `<div><span class="k">live SSE</span> · grid <span class="v">${gx.length}×${gy.length}×${gz.length}</span> ` +
+      `mm · roi ${meta.roi_mm ? meta.roi_mm.map(v => v.toFixed(1)).join('/') : '—'}</div>`;
+  }
+
+  es.onopen = () => {
+    document.getElementById('meta').innerHTML =
+      `<div><span class="k">live SSE</span> <span class="v">${sseUrl}</span> · waiting for meta / volume_frame…</div>`;
+  };
+  es.onerror = () => {
+    document.getElementById('meta').innerHTML += `<div style="color:#f99;">stream error — reconnecting…</div>`;
+  };
+  es.onmessage = (e) => {
+    let evObj;
+    try { evObj = JSON.parse(e.data); } catch { return; }
+    if (evObj.type === 'campaign_start') {
+      ingestGridMeta(evObj.payload || {});
+      return;
+    }
+    if (evObj.type !== 'volume_frame') return;
+    const payload = evObj.payload;
+    const [Nx, Ny, Nz] = payload.shape;
+    if (!gridReady) {
+      // late subscriber: derive a synthetic mm grid centered on (0, 0) as
+      // a last-resort fallback — user should re-open after CAMPAIGN_START
+      const roi = payload.roi_mm || [-1, -1, 1, 1];
+      const depth = payload.depth_mm || 0.4;
+      const gx = Array.from({length: Nx}, (_,i) => roi[0] + (roi[2] - roi[0]) * i / (Nx - 1));
+      const gy = Array.from({length: Ny}, (_,i) => roi[1] + (roi[3] - roi[1]) * i / (Ny - 1));
+      const gz = Array.from({length: Nz}, (_,i) => depth * i / (Nz - 1));
+      ingestGridMeta({
+        grid_x_mm: gx, grid_y_mm: gy, grid_z_mm: gz,
+        roi_mm: roi, liquidus_K: liquidusK, boiling_K: boilingK, preheat_K: preheatK,
+      });
+    }
+    vmin = payload.vmin_K;
+    vmax = payload.vmax_K;
+    // decode b64 -> uint8 -> Float32 in K
+    const bytes = atob(payload.data_b64);
+    const u8 = new Uint8Array(bytes.length);
+    for (let i = 0; i < bytes.length; i++) u8[i] = bytes.charCodeAt(i);
+    const tK = new Float32Array(Nx * Ny * Nz);
+    const span = vmax - vmin;
+    for (let i = 0; i < tK.length; i++) tK[i] = vmin + (u8[i] / 255) * span;
+    const frame = {
+      t_s: payload.t_s,
+      t_K: tK,
+      laser_x_mm: payload.laser_x_mm,
+      laser_y_mm: payload.laser_y_mm,
+    };
+    FRAMES.push(frame);
+    while (FRAMES.length > 240) FRAMES.shift();
+    totalFrames = FRAMES.length;
+    document.getElementById('seek').max = String(totalFrames - 1);
+    frameIdx = totalFrames - 1;
+    renderFrame(frameIdx);
+  };
+}
+
+// ====== UI ======
+document.getElementById('play').onclick = () => {
+  playing = !playing;
+  document.getElementById('play').textContent = playing ? '⏸' : '▶';
+};
+document.getElementById('reset').onclick = () => { frameIdx = 0; renderFrame(0); };
+document.getElementById('seek').oninput = (e) => {
+  frameIdx = parseInt(e.target.value);
+  renderFrame(frameIdx);
+};
+document.getElementById('iso').oninput = (e) => {
+  uniforms.uIsoFrac.value = parseFloat(e.target.value);
+  document.getElementById('iso-val').textContent =
+    uniforms.uIsoFrac.value === 0 ? 'off' : uniforms.uIsoFrac.value.toFixed(2);
+};
+document.getElementById('psize').oninput = (e) => {
+  uniforms.uPointSize.value = parseFloat(e.target.value);
+  document.getElementById('psize-val').textContent = e.target.value;
+};
+document.getElementById('psize-val').textContent = String(initialPointSize);
+document.getElementById('iso').value = String(initialIsoFrac);
+document.getElementById('iso-val').textContent =
+  initialIsoFrac === 0 ? 'off' : initialIsoFrac.toFixed(2);
+
+function animate() {
+  const now = performance.now();
+  const dt = (now - lastT) / 1000;
+  lastT = now;
+  if (playing && FRAMES.length > 0 && MODE === 'static') {
+    frameIdx = (frameIdx + Math.max(1, Math.floor(dt * 6))) % FRAMES.length;
+    renderFrame(frameIdx);
+  }
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(animate);
+}
+
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+// ====== Boot ======
+(async () => {
+  try {
+    if (liveUrl) {
+      startLive(liveUrl);
+    } else {
+      const url = sceneUrl || '/scene.json';
+      await loadStaticScene(url);
+    }
+    animate();
+  } catch (err) {
+    document.getElementById('meta').innerHTML =
+      `<span style="color:#f99;">ERROR: ${err.message}</span>`;
+    console.error(err);
+  }
+})();
+</script>
+</body>
+</html>
