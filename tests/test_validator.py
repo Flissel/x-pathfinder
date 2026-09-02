@@ -146,3 +146,35 @@ def test_three_hundred_status_is_not_reachable():
         "acme", ["https://a.example"], ["acme", "raised"]
     )
     assert verdict.validated is False
+
+
+# ============ CRITICAL FIX TESTS (FIX ROUND 2) ============
+
+
+def test_non_string_claim_token_does_not_raise():
+    """FIX ROUND 2: coerce claim_tokens to string to prevent AttributeError.
+    A list like [123, 'acme'] is not vacuously empty; validation proceeds
+    and checks if the tokens (coerced to strings) are found."""
+    validator = EvidenceValidator(
+        fetcher=_fetcher({"https://a.example": "unrelated content"})
+    )
+    # Should not raise AttributeError; non-string token is coerced to string
+    # and checked. Since "123" and "acme" are not in the body, verdict is False.
+    verdict = validator.validate("acme", ["https://a.example"], [123, "acme"])
+
+    assert verdict.validated is False
+    assert "claim not found" in verdict.reason
+    # No exception should escape
+
+
+def test_non_string_claim_token_matches_by_string_form():
+    """FIX ROUND 2: non-string tokens are coerced and must match like strings.
+    With [123, 'acme'] against a body containing both '123' and 'acme',
+    validation succeeds. Proves coercion did not turn tokens into vacuous pass."""
+    validator = EvidenceValidator(
+        fetcher=_fetcher({"https://a.example": "The account number is 123 for acme"})
+    )
+    verdict = validator.validate("acme", ["https://a.example"], [123, "acme"])
+
+    assert verdict.validated is True
+    assert "claim confirmed" in verdict.reason

@@ -44,7 +44,8 @@ class EvidenceValidator:
 
         # CRITICAL 1: empty claim_tokens vacuously passes anything reachable
         # Fail closed: there is nothing to verify, so it cannot be confirmed
-        if not claim_tokens or all(not t or not t.strip() for t in claim_tokens):
+        # Coerce to string to prevent AttributeError on non-string elements
+        if not claim_tokens or all(not str(t).strip() for t in claim_tokens):
             return Verdict(False, "no claim tokens to verify")
 
         unreachable = 0
@@ -58,7 +59,7 @@ class EvidenceValidator:
                     continue
 
                 haystack = (body or "").lower()
-                if all(token.lower() in haystack for token in claim_tokens):
+                if all(str(token).lower() in haystack for token in claim_tokens):
                     return Verdict(True, f"claim confirmed at {url}")
             except Exception as exc:
                 logger.debug("evidence fetch failed for %s: %s", url, exc)
