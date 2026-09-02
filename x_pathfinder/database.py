@@ -59,6 +59,7 @@ class EmailDatabase:
                     smtp_valid SMALLINT DEFAULT -1,
                     strategy_id TEXT DEFAULT '',
                     domain TEXT DEFAULT '',
+                    country TEXT DEFAULT 'XX',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
