@@ -5,7 +5,7 @@ import psycopg2
 import pytest
 
 DSN = os.environ.get(
-    "DATABASE_URL", "postgresql://pathfinder:pathfinder@localhost:5434/emails"
+    "DATABASE_URL", "postgresql://pathfinder:pathfinder@127.0.0.1:5434/emails"
 )
 EXPECTED_TABLES = {"accounts", "emails", "strategies", "runs"}
 
