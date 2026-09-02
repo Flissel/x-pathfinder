@@ -263,6 +263,7 @@ class AccountFitnessEvaluator:
                 if result is None:
                     account.fitness_score = 0.0
                     account.fitness_source = "unscored"
+                    account.evidence_urls = []
                     continue
                 account.fitness_score = 0.0 if result.score is None else result.score
                 account.fitness_source = result.source
