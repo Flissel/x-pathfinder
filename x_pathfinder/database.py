@@ -219,6 +219,26 @@ class EmailDatabase:
             columns = [d[0] for d in cur.description]
             return [dict(zip(columns, row)) for row in cur.fetchall()]
 
+    def mark_promoted(self, handle: str):
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE accounts SET promoted_at = NOW() WHERE handle = %s",
+                (handle,),
+            )
+        conn.commit()
+
+    def record_verdict(self, handle: str, validated: bool, reason: str):
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE accounts
+                   SET validated = %s, verdict_reason = %s, validated_at = NOW()
+                   WHERE handle = %s""",
+                (validated, reason, handle),
+            )
+        conn.commit()
+
     def get_account_count(self) -> int:
         conn = self._get_conn()
         with conn.cursor() as cur:
