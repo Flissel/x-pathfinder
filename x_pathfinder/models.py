@@ -26,6 +26,8 @@ class XAccount:
     discovered_at: str = field(default_factory=lambda: datetime.now().isoformat())
     discovered_by: str = ""  # Strategy ID that found this account
     fitness_score: float = 0.0
+    fitness_source: str = "unscored"
+    evidence_urls: List[str] = field(default_factory=list)
     niche: str = ""
     recent_tweets: List[str] = field(default_factory=list)
     hashtags_used: List[str] = field(default_factory=list)
@@ -44,6 +46,8 @@ class XAccount:
             "discovered_at": self.discovered_at,
             "discovered_by": self.discovered_by,
             "fitness_score": self.fitness_score,
+            "fitness_source": self.fitness_source,
+            "evidence_urls": self.evidence_urls,
             "niche": self.niche,
             "recent_tweets": self.recent_tweets,
             "hashtags_used": self.hashtags_used,
@@ -64,6 +68,8 @@ class XAccount:
             discovered_at=data.get("discovered_at", datetime.now().isoformat()),
             discovered_by=data.get("discovered_by", ""),
             fitness_score=data.get("fitness_score", 0.0),
+            fitness_source=data.get("fitness_source", "unscored"),
+            evidence_urls=data.get("evidence_urls", []),
             niche=data.get("niche", ""),
             recent_tweets=data.get("recent_tweets", []),
             hashtags_used=data.get("hashtags_used", []),

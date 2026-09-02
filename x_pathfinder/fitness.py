@@ -99,10 +99,12 @@ class AccountFitnessEvaluator:
     - Signal Indicators: 15 points
     """
 
-    def __init__(self, niche: str = "ai", custom_keywords: List[str] = None):
+    def __init__(self, niche: str = "ai", custom_keywords: List[str] = None,
+                 provider=None):
         self.niche = niche.lower()
         self.keywords = NICHE_KEYWORDS.get(self.niche, NICHE_KEYWORDS["ai"])
         self.custom_keywords = [k.lower() for k in (custom_keywords or [])]
+        self.provider = provider
 
     def evaluate(self, account: XAccount) -> float:
         """Evaluate account fitness. Returns score 0-100."""
@@ -250,8 +252,20 @@ class AccountFitnessEvaluator:
         return min(15.0, score)
 
     def batch_evaluate(self, accounts: List[XAccount]) -> List[XAccount]:
-        """Evaluate a batch of accounts and sort by fitness."""
-        for account in accounts:
-            self.evaluate(account)
+        """Evaluate a batch of accounts and sort by fitness, best first."""
+        if self.provider is None:
+            for account in accounts:
+                self.evaluate(account)
+        else:
+            results = self.provider.score_batch(accounts)
+            for account in accounts:
+                result = results.get(account.handle.lower())
+                if result is None:
+                    account.fitness_score = 0.0
+                    account.fitness_source = "unscored"
+                    continue
+                account.fitness_score = 0.0 if result.score is None else result.score
+                account.fitness_source = result.source
+                account.evidence_urls = list(result.evidence_urls)
         accounts.sort(key=lambda a: a.fitness_score, reverse=True)
         return accounts
