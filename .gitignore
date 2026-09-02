@@ -7,3 +7,8 @@ __pycache__/
 knowledge/
 emails_export.csv
 hot_backers.json
+.venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
