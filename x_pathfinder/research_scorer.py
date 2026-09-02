@@ -10,8 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
-import re
-from typing import Callable, Optional
+from typing import Callable
 
 from .fitness_providers import (
     SOURCE_RESEARCH,
@@ -24,8 +23,6 @@ logger = logging.getLogger(__name__)
 
 OPENFANG_URL = "http://127.0.0.1:4200"
 RESEARCH_AGENT_ID = "f241f569-e6ab-429d-8d61-247889722e84"
-
-_JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 PROMPT_TEMPLATE = """Score each candidate below for fitness in the niche "{niche}".
 
@@ -50,43 +47,49 @@ class ResearchUnavailable(RuntimeError):
     """The research backend could not be reached at all."""
 
 
-def _default_transport(message: str, attempts: int = 3) -> str:
-    """Synchronous POST with exponential backoff.
+def _make_default_transport(agent_id: str = RESEARCH_AGENT_ID):
+    """Factory for the default transport with exponential backoff.
 
     Spec §7 asks to reuse rate_limiter.py, but AdaptiveRateLimiter is
     async-only (`async def acquire`) while this scorer is called from
     synchronous GA code. Rather than drag an event loop into the call path,
     the same backoff shape is applied inline. Deviation is deliberate.
     """
-    import time
 
-    import requests
+    def _transport(message: str, attempts: int = 3) -> str:
+        import time
 
-    delay = 2.0
-    last_error: Exception | None = None
-    for _ in range(attempts):
-        try:
-            response = requests.post(
-                f"{OPENFANG_URL}/api/agents/{RESEARCH_AGENT_ID}/message",
-                json={"message": message},
-                timeout=(5, 180),
-            )
-            response.raise_for_status()
-            return response.json().get("response", "")
-        except Exception as exc:
-            last_error = exc
-            time.sleep(delay)
-            delay *= 2
-    raise last_error  # surfaces as ResearchUnavailable in score_batch
+        import requests
+
+        delay = 2.0
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    f"{OPENFANG_URL}/api/agents/{agent_id}/message",
+                    json={"message": message},
+                    timeout=(5, 180),
+                )
+                response.raise_for_status()
+                return response.json().get("response", "")
+            except Exception as exc:
+                last_error = exc
+                # Only sleep between attempts, not after the last one
+                if attempt < attempts - 1:
+                    time.sleep(delay)
+                    delay *= 2
+        raise last_error  # surfaces as ResearchUnavailable in score_batch
+
+    return _transport
 
 
 class ResearchScorer:
     def __init__(
         self,
-        transport: Callable[[str], str] = _default_transport,
+        transport: Callable[[str], str] | None = None,
         agent_id: str = RESEARCH_AGENT_ID,
     ):
-        self._transport = transport
+        self._transport = transport if transport is not None else _make_default_transport(agent_id)
         self.agent_id = agent_id
 
     def score(self, candidate: XAccount) -> FitnessResult:
@@ -112,12 +115,14 @@ class ResearchScorer:
         }
 
     def _parse(self, raw: str) -> dict[str, dict]:
-        match = _JSON_BLOCK_RE.search(raw or "")
-        if not match:
+        decoder = json.JSONDecoder()
+        text = raw or ""
+        start = text.find("{")
+        if start == -1:
             logger.warning("research response contained no JSON block")
             return {}
         try:
-            payload = json.loads(match.group(0))
+            payload, _ = decoder.raw_decode(text[start:])
         except json.JSONDecodeError as exc:
             logger.warning("research response was not valid JSON: %s", exc)
             return {}
@@ -136,8 +141,25 @@ class ResearchScorer:
                 source=SOURCE_UNSCORED,
                 signals={"reason": "no sourced result returned"},
             )
+        # Defensively coerce the score; if it's malformed, return unscored
+        # rather than crashing the batch.
+        score_value = item.get("score")
+        try:
+            if score_value is None:
+                return FitnessResult(
+                    score=None,
+                    source=SOURCE_UNSCORED,
+                    signals={"reason": "malformed score field"},
+                )
+            score = float(score_value)
+        except (TypeError, ValueError):
+            return FitnessResult(
+                score=None,
+                source=SOURCE_UNSCORED,
+                signals={"reason": "malformed score field"},
+            )
         return FitnessResult(
-            score=float(item.get("score", 0.0)),
+            score=score,
             source=SOURCE_RESEARCH,
             signals={"reason": item.get("reason", "")},
             evidence_urls=urls,

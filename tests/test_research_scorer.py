@@ -78,3 +78,58 @@ def test_transport_failure_raises_research_unavailable():
     scorer = ResearchScorer(transport=_boom)
     with pytest.raises(ResearchUnavailable):
         scorer.score_batch([XAccount(handle="acme")])
+
+
+def test_valid_json_followed_by_trailing_braces_still_parses():
+    """Greedy regex would match from first { to last }, breaking on trailing prose with braces."""
+    payload = json.dumps(
+        {"results": [{"handle": "acme", "score": 75, "evidence_urls": ["https://real.example"]}]}
+    ) + "\n\nThreshold is {50}. All done."
+    scorer = ResearchScorer(transport=_transport_returning(payload))
+    result = scorer.score_batch([XAccount(handle="acme")])["acme"]
+    assert result.score == 75
+    assert result.source == SOURCE_RESEARCH
+
+
+def test_null_score_with_evidence_urls_yields_unscored():
+    """null score should not crash; candidate should be unscored."""
+    payload = json.dumps(
+        {"results": [{"handle": "acme", "score": None, "evidence_urls": ["https://real.example"]}]}
+    )
+    scorer = ResearchScorer(transport=_transport_returning(payload))
+    result = scorer.score_batch([XAccount(handle="acme")])["acme"]
+    assert result.source == SOURCE_UNSCORED
+    assert result.score is None
+
+
+def test_non_numeric_score_with_evidence_urls_yields_unscored():
+    """Non-numeric score like 'high' should not crash; candidate should be unscored."""
+    payload = json.dumps(
+        {"results": [{"handle": "acme", "score": "high", "evidence_urls": ["https://real.example"]}]}
+    )
+    scorer = ResearchScorer(transport=_transport_returning(payload))
+    result = scorer.score_batch([XAccount(handle="acme")])["acme"]
+    assert result.source == SOURCE_UNSCORED
+    assert result.score is None
+
+
+def test_one_malformed_score_does_not_poison_batch():
+    """Batch of two candidates where one has malformed score; the other should still get real score."""
+    payload = json.dumps(
+        {
+            "results": [
+                {"handle": "good", "score": 80, "evidence_urls": ["https://good.example"]},
+                {"handle": "bad", "score": "not_a_number", "evidence_urls": ["https://bad.example"]},
+            ]
+        }
+    )
+    scorer = ResearchScorer(transport=_transport_returning(payload))
+    results = scorer.score_batch([XAccount(handle="good"), XAccount(handle="bad")])
+
+    # Good candidate should have real score despite bad candidate
+    assert results["good"].score == 80
+    assert results["good"].source == SOURCE_RESEARCH
+
+    # Bad candidate should be unscored
+    assert results["bad"].score is None
+    assert results["bad"].source == SOURCE_UNSCORED
