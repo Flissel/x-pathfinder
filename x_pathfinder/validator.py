@@ -42,22 +42,28 @@ class EvidenceValidator:
         if not evidence_urls:
             return Verdict(False, "no evidence urls to check")
 
+        # CRITICAL 1: empty claim_tokens vacuously passes anything reachable
+        # Fail closed: there is nothing to verify, so it cannot be confirmed
+        if not claim_tokens or all(not t or not t.strip() for t in claim_tokens):
+            return Verdict(False, "no claim tokens to verify")
+
         unreachable = 0
         for url in evidence_urls:
             try:
                 status, body = self._fetcher(url)
+                # CRITICAL 2: widen guard to catch malformed status/body
+                # Coerce status and lowercase body inside the try block
+                if not (200 <= int(status) < 300):
+                    unreachable += 1
+                    continue
+
+                haystack = (body or "").lower()
+                if all(token.lower() in haystack for token in claim_tokens):
+                    return Verdict(True, f"claim confirmed at {url}")
             except Exception as exc:
                 logger.debug("evidence fetch failed for %s: %s", url, exc)
                 unreachable += 1
                 continue
-
-            if not (200 <= int(status) < 400):
-                unreachable += 1
-                continue
-
-            haystack = (body or "").lower()
-            if all(token.lower() in haystack for token in claim_tokens):
-                return Verdict(True, f"claim confirmed at {url}")
 
         if unreachable == len(evidence_urls):
             return Verdict(False, "all evidence urls unreachable")
@@ -78,8 +84,9 @@ class EmailValidator:
     def validate(self, email: str) -> Verdict:
         if "@" not in email:
             return Verdict(False, "malformed email address")
-        domain = email.rpartition("@")[2]
-        if not domain:
+        # IMPORTANT 3: require BOTH non-empty local-part and non-empty domain
+        local_part, _, domain = email.rpartition("@")
+        if not local_part or not domain:
             return Verdict(False, "malformed email address")
         try:
             if not self._mx_check(domain):

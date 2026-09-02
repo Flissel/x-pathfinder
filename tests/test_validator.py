@@ -86,3 +86,63 @@ def test_unknown_smtp_result_fails_closed():
 def test_malformed_email_is_refuted():
     verdict = EmailValidator(lambda d: True, lambda e: True).validate("not-an-email")
     assert verdict.validated is False
+
+
+# ============ CRITICAL FIX TESTS (FIX ROUND 1) ============
+
+
+def test_empty_claim_tokens_with_reachable_url_is_refuted():
+    """CRITICAL 1: all() over empty iterable is True in Python.
+    With no claim tokens to verify, we cannot confirm anything."""
+    validator = EvidenceValidator(
+        fetcher=_fetcher({"https://a.example": "totally unrelated content"})
+    )
+    verdict = validator.validate("acme", ["https://a.example"], [])
+
+    assert verdict.validated is False
+    assert "no claim tokens to verify" in verdict.reason
+
+
+def test_fetcher_returning_none_status_fails_closed():
+    """CRITICAL 2: malformed status crashes int() coercion if unguarded.
+    Exception must not propagate; URL is marked unreachable."""
+    def _bad_status(url: str):
+        return None, "body"
+
+    verdict = EvidenceValidator(fetcher=_bad_status).validate(
+        "acme", ["https://a.example"], ["acme"]
+    )
+    assert verdict.validated is False
+    # No exception should escape
+
+
+def test_fetcher_returning_non_string_body_fails_closed():
+    """CRITICAL 2: non-string body crashes .lower() if unguarded.
+    Exception must not propagate; URL is marked unreachable."""
+    def _bad_body(url: str):
+        return 200, 12345  # int instead of string
+
+    verdict = EvidenceValidator(fetcher=_bad_body).validate(
+        "acme", ["https://a.example"], ["acme"]
+    )
+    assert verdict.validated is False
+    # No exception should escape
+
+
+def test_email_with_empty_local_part_is_refuted():
+    """IMPORTANT 3: "@nodomain" has no local-part; it is malformed."""
+    verdict = EmailValidator(lambda d: True, lambda e: True).validate("@nodomain")
+    assert verdict.validated is False
+    assert "malformed" in verdict.reason
+
+
+def test_three_hundred_status_is_not_reachable():
+    """MINOR 4: 3xx is a redirect page, not the source document.
+    A claim found in a 302 body is not confirmed at the source."""
+    def _three_hundred(url: str):
+        return 302, "Acme raised money"
+
+    verdict = EvidenceValidator(fetcher=_three_hundred).validate(
+        "acme", ["https://a.example"], ["acme", "raised"]
+    )
+    assert verdict.validated is False
