@@ -68,7 +68,7 @@ class PromotionGate:
     def promote(self, rows: list[dict]) -> dict:
         promoted = skipped = 0
         for row in rows:
-            if row.get("validated") is not True or row.get("promoted_at"):
+            if row.get("validated") is not True or row.get("promoted_at") is not None:
                 skipped += 1
                 continue
             self._writer.insert(self.TABLE, row)

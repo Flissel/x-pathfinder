@@ -46,6 +46,19 @@ def test_already_promoted_row_is_not_promoted_twice():
     assert writer.rows == []
 
 
+@pytest.mark.parametrize("falsy_promoted_at", ["", 0, False])
+def test_falsy_but_not_none_promoted_at_still_skips(falsy_promoted_at):
+    db, writer = _StubDb(), _StubWriter()
+    gate = PromotionGate(db, writer)
+    summary = gate.promote(
+        [{"handle": "good", "validated": True, "promoted_at": falsy_promoted_at}]
+    )
+
+    assert summary == {"promoted": 0, "skipped": 1}
+    assert writer.rows == []
+    assert db.marked == []
+
+
 def test_writer_without_service_key_raises_before_any_network_call():
     calls = []
 
