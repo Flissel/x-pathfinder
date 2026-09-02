@@ -1,0 +1,134 @@
+"""MCP surface for X-Pathfinder.
+
+Lets the Brain and OpenFang hands drive discovery, scoring, validation and
+promotion. Every handler returns a plain dict; nothing raises across the
+tool boundary, because an MCP client cannot act on a traceback.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+
+logger = logging.getLogger(__name__)
+
+DSN = os.environ.get(
+    "DATABASE_URL", "postgresql://pathfinder:pathfinder@localhost:5434/emails"
+)
+
+
+def _database():
+    from .database import EmailDatabase
+
+    return EmailDatabase(dsn=DSN)
+
+
+def _tool_discover(niche: str = "ai", generations: int = 3, top: int = 20,
+                   concurrent: int = 3, **_):
+    import asyncio
+
+    from .account_discoverer import AccountDiscoverer
+
+    discoverer = AccountDiscoverer(niche=niche, max_concurrent=concurrent)
+    accounts = asyncio.run(discoverer.run(generations=generations))
+    return {"discovered": len(accounts),
+            "handles": [a.handle for a in accounts[:top]]}
+
+
+def _tool_score(limit: int = 50, **_):
+    from .composite_scorer import CompositeScorer
+    from .fitness_providers import DeterministicScorer
+    from .models import XAccount
+    from .research_scorer import ResearchScorer
+
+    db = _database()
+    try:
+        rows = db.get_unvalidated(limit=limit)
+        candidates = [XAccount(handle=row["handle"]) for row in rows]
+        scorer = CompositeScorer(DeterministicScorer(), ResearchScorer())
+        results = scorer.score_batch(candidates)
+        for candidate in candidates:
+            result = results.get(candidate.handle.lower())
+            if result is None:
+                continue
+            candidate.fitness_score = 0.0 if result.score is None else result.score
+            candidate.fitness_source = result.source
+            candidate.evidence_urls = list(result.evidence_urls)
+        return {"scored": db.save_scored_accounts(candidates)}
+    finally:
+        db.close()
+
+
+def _tool_validate(limit: int = 50, **_):
+    from .validator import EvidenceValidator
+
+    db = _database()
+    try:
+        validator = EvidenceValidator()
+        checked = confirmed = 0
+        for row in db.get_unvalidated(limit=limit):
+            verdict = validator.validate(
+                row["handle"], row.get("evidence_urls") or [], [row["handle"]]
+            )
+            db.record_verdict(row["handle"], verdict.validated, verdict.reason)
+            checked += 1
+            confirmed += 1 if verdict.validated else 0
+        return {"checked": checked, "confirmed": confirmed}
+    finally:
+        db.close()
+
+
+def _tool_promote(limit: int = 50, **_):
+    from .promotion import PromotionGate, SupabaseWriter
+
+    db = _database()
+    try:
+        writer = SupabaseWriter(
+            service_key=os.environ.get("SUPABASE_SERVICE_KEY", "")
+        )
+        # Only validated=True, not-yet-promoted rows are eligible for the
+        # gate. get_unvalidated() selects the opposite (validated IS NULL,
+        # i.e. rows the validator hasn't touched) and would leave
+        # PromotionGate.promote() skipping everything, forever, silently.
+        rows = [row for row in db.get_validated_unpromoted(limit=limit)]
+        return PromotionGate(db, writer).promote(rows)
+    finally:
+        db.close()
+
+
+def _tool_status(**_):
+    db = _database()
+    try:
+        return db.get_stats()
+    finally:
+        db.close()
+
+
+def _tool_export(output: str = "emails_export.csv", country: str = None, **_):
+    db = _database()
+    try:
+        db.export_csv(output, verified_only=True, country=country)
+        return {"exported_to": output}
+    finally:
+        db.close()
+
+
+TOOLS = {
+    "xpf_discover": _tool_discover,
+    "xpf_score": _tool_score,
+    "xpf_validate": _tool_validate,
+    "xpf_promote": _tool_promote,
+    "xpf_status": _tool_status,
+    "xpf_export": _tool_export,
+}
+
+
+def handle_call(name: str, arguments: dict) -> dict:
+    handler = TOOLS.get(name)
+    if handler is None:
+        return {"ok": False, "error": f"unknown tool: {name}"}
+    try:
+        return {"ok": True, "result": handler(**(arguments or {}))}
+    except Exception as exc:
+        logger.exception("tool %s failed", name)
+        return {"ok": False, "error": str(exc)}
