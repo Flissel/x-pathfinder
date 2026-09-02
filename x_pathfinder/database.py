@@ -82,6 +82,24 @@ class EmailDatabase:
                     status TEXT DEFAULT 'running'
                 );
 
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS fitness_score REAL DEFAULT 0.0;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS fitness_source TEXT DEFAULT 'unscored';
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS signals JSONB;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS evidence_urls JSONB;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS validated BOOLEAN DEFAULT NULL;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verdict_reason TEXT;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
+
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS fitness_score REAL DEFAULT 0.0;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS fitness_source TEXT DEFAULT 'unscored';
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS signals JSONB;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS evidence_urls JSONB;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS validated BOOLEAN DEFAULT NULL;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS verdict_reason TEXT;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
+
                 CREATE INDEX IF NOT EXISTS idx_emails_handle ON emails(handle);
                 CREATE INDEX IF NOT EXISTS idx_emails_mx ON emails(mx_valid);
                 CREATE INDEX IF NOT EXISTS idx_emails_smtp ON emails(smtp_valid);
@@ -127,6 +145,79 @@ class EmailDatabase:
                     for a in accounts
                 ],
             )
+
+    def save_scored_accounts(self, accounts) -> int:
+        """Write every scored account to stage, unfiltered and unvalidated."""
+        import json
+
+        conn = self._get_conn()
+        written = 0
+        with conn.cursor() as cur:
+            for account in accounts:
+                cur.execute(
+                    """INSERT INTO accounts
+                       (handle, display_name, bio, followers, niche, source,
+                        fitness_score, fitness_source, signals, evidence_urls)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (handle) DO UPDATE SET
+                           fitness_score = EXCLUDED.fitness_score,
+                           fitness_source = EXCLUDED.fitness_source,
+                           signals = EXCLUDED.signals,
+                           evidence_urls = EXCLUDED.evidence_urls""",
+                    (
+                        account.handle,
+                        account.display_name,
+                        account.bio,
+                        account.followers,
+                        account.niche,
+                        account.discovered_by,
+                        account.fitness_score,
+                        account.fitness_source,
+                        json.dumps({}),
+                        json.dumps(list(account.evidence_urls)),
+                    ),
+                )
+                written += 1
+        conn.commit()
+        return written
+
+    def get_unvalidated(self, limit: int = 100):
+        """Stage rows that have not been through the validator yet."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT handle, fitness_score, fitness_source, evidence_urls,
+                          validated, verdict_reason
+                   FROM accounts WHERE validated IS NULL
+                   ORDER BY fitness_score DESC LIMIT %s""",
+                (limit,),
+            )
+            columns = [d[0] for d in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def get_validated_unpromoted(self, limit: int = 100):
+        """Rows the validator confirmed that have not yet been promoted.
+
+        This is deliberately the opposite selection of get_unvalidated():
+        validated IS NULL means "not yet checked", while this method needs
+        validated IS TRUE (checked and confirmed) AND promoted_at IS NULL
+        (the promotion gate has not acted on it yet). Reusing
+        get_unvalidated() here would look plausible but would select rows
+        the validator hasn't touched, so the promotion gate would silently
+        promote nothing forever.
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT handle, fitness_score, fitness_source, evidence_urls,
+                          validated, verdict_reason, promoted_at
+                   FROM accounts
+                   WHERE validated IS TRUE AND promoted_at IS NULL
+                   ORDER BY fitness_score DESC LIMIT %s""",
+                (limit,),
+            )
+            columns = [d[0] for d in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
 
     def get_account_count(self) -> int:
         conn = self._get_conn()
