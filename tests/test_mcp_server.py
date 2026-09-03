@@ -37,9 +37,12 @@ def test_discover_stages_its_results_and_uses_the_provider(monkeypatch):
 
     1. AccountDiscoverer receives a CompositeScorer, so the GA scores
        through the provider seam instead of the dead Twitter fields.
-    2. The discovered accounts are written to the stage DB. Without that,
-       xpf_score could only ever see rows the email daemon left behind and
-       the spec's discovery -> stage step was unwired.
+    2. The discovered accounts are written to the stage DB, via
+       save_discovered_accounts and NOT save_scored_accounts. Without the
+       write at all, xpf_score could only ever see rows the email daemon
+       left behind. Through the scoring method, a second discovery run
+       would reset the verdicts of already-validated rows, because run()
+       returns every account seen this session and not only the new ones.
     """
     from x_pathfinder import account_discoverer as ad_module
     from x_pathfinder import mcp_server
@@ -59,9 +62,15 @@ def test_discover_stages_its_results_and_uses_the_provider(monkeypatch):
         async def run(self, generations=15, on_progress=None):
             return discovered
 
+    wrong_method = []
+
     class _FakeDb:
-        def save_scored_accounts(self, accounts):
+        def save_discovered_accounts(self, accounts):
             saved.extend(accounts)
+            return len(accounts)
+
+        def save_scored_accounts(self, accounts):
+            wrong_method.append(accounts)
             return len(accounts)
 
         def close(self):
@@ -77,6 +86,9 @@ def test_discover_stages_its_results_and_uses_the_provider(monkeypatch):
         "discovered": 2, "staged": 2, "handles": ["alpha"],
     }
     assert [a.handle for a in saved] == ["alpha", "beta"]
+    assert wrong_method == [], (
+        "discovery must not go through the verdict-resetting scoring path"
+    )
     assert closed == [True], "the database handle must be closed"
     assert isinstance(constructed[0]["provider"], CompositeScorer)
 

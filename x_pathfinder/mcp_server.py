@@ -50,7 +50,13 @@ def _tool_discover(niche: str = "ai", generations: int = 3, top: int = 20,
         # the unfiltered tier by design -- everything lands here, unscored
         # candidates included -- because nothing here is trusted yet. Only
         # the validator's verdict lets a row leave for Supabase.
-        staged = db.save_scored_accounts(accounts)
+        #
+        # save_discovered_accounts, NOT save_scored_accounts: run() returns
+        # every account seen this session, so a second discovery run would
+        # otherwise restage already-validated rows and reset their verdicts
+        # against evidence that was never re-scored. Scoring is _tool_score's
+        # job; this call only records that the accounts were seen.
+        staged = db.save_discovered_accounts(accounts)
     finally:
         db.close()
 

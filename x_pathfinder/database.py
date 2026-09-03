@@ -195,6 +195,66 @@ class EmailDatabase:
         conn.commit()
         return written
 
+    def save_discovered_accounts(self, accounts) -> int:
+        """Stage a discovery run's output without disturbing existing verdicts.
+
+        Deliberately NOT save_scored_accounts. AccountDiscoverer.run()
+        returns every account seen in the session, not only the new ones, so
+        a second xpf_discover restages rows that have already been scored and
+        validated. Through save_scored_accounts that would (correctly, per its
+        own contract) reset the verdict — but the "re-score" it is reacting to
+        never happened: rediscovery carries no new evidence, only deterministic
+        placeholders. The result was a confirmed row losing its evidence_urls,
+        verdict_reason and signals to empty values, which destroys the audit
+        trail the spec requires ("Abgelehnte Kandidaten bleiben in Stage MIT
+        Ablehnungsgrund stehen — auditierbar") and can strand a row that was
+        already confirmed.
+
+        So: a new handle is inserted exactly as the scoring path inserts it
+        (legitimately unscored, unvalidated, no evidence), and an existing
+        handle has ONLY its discovery fields refreshed. Scoring and verdict
+        columns are the scoring path's to write, and are left alone here.
+        """
+        import json
+
+        conn = self._get_conn()
+        written = 0
+        with conn.cursor() as cur:
+            for account in accounts:
+                cur.execute(
+                    """INSERT INTO accounts
+                       (handle, display_name, bio, followers, niche, source,
+                        fitness_score, fitness_source, signals, evidence_urls)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (handle) DO UPDATE SET
+                           display_name = EXCLUDED.display_name,
+                           bio = EXCLUDED.bio,
+                           followers = EXCLUDED.followers,
+                           niche = EXCLUDED.niche,
+                           source = EXCLUDED.source""",
+                    # fitness_score/fitness_source/signals/evidence_urls are
+                    # bound for the INSERT branch only (a brand-new row is
+                    # allowed to carry whatever the GA scored it as); the
+                    # UPDATE branch above deliberately omits them, along with
+                    # validated / verdict_reason / validated_at / promoted_at.
+                    (
+                        account.handle,
+                        account.display_name,
+                        account.bio,
+                        account.followers,
+                        account.niche,
+                        account.discovered_by,
+                        account.fitness_score,
+                        account.fitness_source,
+                        json.dumps(dict(getattr(account, "signals", None) or {}),
+                                   default=str),
+                        json.dumps(list(account.evidence_urls)),
+                    ),
+                )
+                written += 1
+        conn.commit()
+        return written
+
     def get_unvalidated(self, limit: int = 100):
         """Stage rows that have not been through the validator yet."""
         conn = self._get_conn()

@@ -97,6 +97,118 @@ def test_stage_row_carries_its_niche_back_out(db):
     assert db.get_validated_unpromoted()[0]["niche"] == "security"
 
 
+def test_rediscovery_preserves_the_audit_bundle(db):
+    """A discovery run must not overwrite what a scoring run established.
+
+    AccountDiscoverer.run() returns every account seen in the session, not
+    only the new ones, so re-running xpf_discover restages already-validated
+    rows. Routed through save_scored_accounts that reset the verdict and
+    replaced evidence_urls/signals with deterministic placeholders -- fail-
+    closed, but it destroys the audit trail and strands a confirmed row.
+    The discovery path refreshes only what discovery actually observed.
+    """
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", display_name="Acme Inc",
+                 followers=500, fitness_score=88.0, fitness_source="composite",
+                 signals={"reason": "series A confirmed"},
+                 evidence_urls=["https://news.example/acme-series-a"]),
+    ])
+    db.record_verdict("acme", True, "claim confirmed at https://news.example/acme-series-a")
+
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT validated_at FROM accounts WHERE handle = 'acme';")
+        validated_at_before = cur.fetchone()[0]
+    assert validated_at_before is not None
+
+    # Rediscovery: same handle, fresh discovery metadata, no evidence and
+    # only the cheap deterministic score the GA could produce without one.
+    written = db.save_discovered_accounts([
+        XAccount(handle="acme", niche="ai", display_name="Acme Incorporated",
+                 followers=512, fitness_score=40.0,
+                 fitness_source="deterministic",
+                 signals={"profile_resolves": True}, evidence_urls=[]),
+    ])
+    assert written == 1
+
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT validated, verdict_reason, validated_at, evidence_urls, "
+            "signals, fitness_score, fitness_source, display_name, followers "
+            "FROM accounts WHERE handle = 'acme';"
+        )
+        (validated, reason, validated_at, evidence, signals, score, source,
+         display_name, followers) = cur.fetchone()
+
+    # The audit bundle survives, untouched.
+    assert validated is True
+    assert reason == "claim confirmed at https://news.example/acme-series-a"
+    assert validated_at == validated_at_before
+    assert evidence == ["https://news.example/acme-series-a"]
+    assert signals == {"reason": "series A confirmed"}
+    assert score == 88.0
+    assert source == "composite"
+    # The row is still promotable -- rediscovery did not strand it.
+    assert [row["handle"] for row in db.get_validated_unpromoted()] == ["acme"]
+
+    # But what discovery genuinely re-observed DID update.
+    assert display_name == "Acme Incorporated"
+    assert followers == 512
+
+
+def test_discovery_still_inserts_genuinely_new_accounts(db):
+    """A newly discovered account is legitimately unscored and unvalidated."""
+    written = db.save_discovered_accounts([
+        XAccount(handle="newcomer", niche="ai", display_name="Newcomer",
+                 followers=7),
+    ])
+    assert written == 1
+
+    rows = {row["handle"]: row for row in db.get_unvalidated()}
+    assert "newcomer" in rows
+    assert rows["newcomer"]["validated"] is None
+    assert rows["newcomer"]["evidence_urls"] == []
+    assert rows["newcomer"]["fitness_source"] == "unscored"
+    assert rows["newcomer"]["niche"] == "ai"
+
+
+def test_scoring_path_still_resets_verdicts_after_the_discovery_split(db):
+    """Regression guard: the discovery/scoring split must not soften FIX 1.
+
+    save_scored_accounts is the path where new evidence arrives, and a
+    verdict reached against the OLD evidence must not survive it. If someone
+    ever makes the scoring path non-resetting too -- e.g. by pointing
+    _tool_score at save_discovered_accounts, or by copying its ON CONFLICT
+    list over -- this fails.
+    """
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", fitness_score=88.0,
+                 fitness_source="composite",
+                 signals={"reason": "series A confirmed"},
+                 evidence_urls=["https://good.example"]),
+    ])
+    db.record_verdict("acme", True, "claim confirmed at https://good.example")
+
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", fitness_score=91.0,
+                 fitness_source="composite",
+                 signals={"reason": "re-researched"},
+                 evidence_urls=["https://404.example"]),
+    ])
+
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT validated, verdict_reason, validated_at, evidence_urls "
+            "FROM accounts WHERE handle = 'acme';"
+        )
+        validated, reason, validated_at, evidence = cur.fetchone()
+
+    assert validated is None, "the scoring path must still invalidate verdicts"
+    assert reason is None
+    assert validated_at is None
+    assert evidence == ["https://404.example"]
+    assert db.get_validated_unpromoted() == []
+
+
 def test_rescoring_invalidates_a_previous_verdict(db):
     """A verdict must not survive the evidence it was based on.
 
