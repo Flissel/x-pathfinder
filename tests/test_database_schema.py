@@ -4,9 +4,10 @@ import os
 import psycopg2
 import pytest
 
-DSN = os.environ.get(
-    "DATABASE_URL", "postgresql://pathfinder:pathfinder@127.0.0.1:5434/emails"
-)
+# tests/conftest.py guarantees DATABASE_URL points at a throwaway database.
+# There is deliberately NO fallback: the fixture below drops tables, and a
+# default that resolved to the production stage store would wipe it.
+DSN = os.environ["DATABASE_URL"]
 EXPECTED_TABLES = {"accounts", "emails", "strategies", "runs"}
 
 

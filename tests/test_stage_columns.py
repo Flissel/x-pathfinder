@@ -6,9 +6,10 @@ import pytest
 from x_pathfinder.database import EmailDatabase
 from x_pathfinder.models import XAccount
 
-DSN = os.environ.get(
-    "DATABASE_URL", "postgresql://pathfinder:pathfinder@127.0.0.1:5434/emails"
-)
+# tests/conftest.py guarantees DATABASE_URL points at a throwaway database.
+# There is deliberately NO fallback: the fixture below drops tables, and a
+# default that resolved to the production stage store would wipe it.
+DSN = os.environ["DATABASE_URL"]
 STAGE_COLUMNS = {
     "fitness_score", "fitness_source", "signals", "evidence_urls",
     "validated", "verdict_reason", "validated_at", "promoted_at",
