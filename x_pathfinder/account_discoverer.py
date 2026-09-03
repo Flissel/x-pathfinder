@@ -35,6 +35,13 @@ class AccountDiscoverer:
         results = await discoverer.run(generations=15)
         for account in results:
             print(f"@{account.handle} fitness={account.fitness_score}")
+
+    Pass ``provider=`` (any object with ``score_batch``) to score through the
+    pluggable fitness layer instead of the dead Twitter-profile fields::
+
+        AccountDiscoverer(niche="ai",
+                          provider=CompositeScorer(DeterministicScorer(),
+                                                   ResearchScorer()))
     """
 
     CRISIS_THRESHOLD = 3
@@ -46,14 +53,21 @@ class AccountDiscoverer:
         custom_hashtags: List[str] = None,
         max_concurrent: int = 3,
         knowledge_dir: str = None,
+        provider=None,
     ):
         self.niche = niche.lower()
         self.max_concurrent = max_concurrent
 
         self.rate_limiter = AdaptiveRateLimiter()
         self.scraper = XScraper(rate_limiter=self.rate_limiter)
+        # provider=None keeps the legacy Twitter-profile scoring path, which
+        # is what the CLI and every existing caller expect. Passing a
+        # FitnessProvider (e.g. CompositeScorer) is what actually restores
+        # selection pressure: the legacy path reads bio/followers/engagement
+        # from syndication.twitter.com, which returns 429 permanently, so
+        # every candidate scores 0.0 and the GA evolves without optimising.
         self.fitness = AccountFitnessEvaluator(
-            niche=self.niche, custom_keywords=custom_keywords
+            niche=self.niche, custom_keywords=custom_keywords, provider=provider
         )
         self.genome = GeneticEngine(
             niche=self.niche,

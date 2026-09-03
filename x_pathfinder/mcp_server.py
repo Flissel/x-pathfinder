@@ -28,8 +28,18 @@ def _tool_discover(niche: str = "ai", generations: int = 3, top: int = 20,
     import asyncio
 
     from .account_discoverer import AccountDiscoverer
+    from .composite_scorer import CompositeScorer
+    from .fitness_providers import DeterministicScorer
+    from .research_scorer import ResearchScorer
 
-    discoverer = AccountDiscoverer(niche=niche, max_concurrent=concurrent)
+    # Without a provider the GA falls back to scoring on Twitter profile
+    # fields that syndication.twitter.com no longer serves, so every
+    # candidate scores 0.0 and there is no selection pressure at all. This
+    # is the same pair _tool_score uses.
+    provider = CompositeScorer(DeterministicScorer(), ResearchScorer())
+    discoverer = AccountDiscoverer(
+        niche=niche, max_concurrent=concurrent, provider=provider
+    )
     accounts = asyncio.run(discoverer.run(generations=generations))
     return {"discovered": len(accounts),
             "handles": [a.handle for a in accounts[:top]]}

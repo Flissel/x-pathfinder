@@ -75,6 +75,34 @@ def test_dropped_candidate_clears_stale_evidence_alongside_score_and_source():
     assert evaluated[0].evidence_urls == []
 
 
+def test_discoverer_hands_its_provider_to_the_fitness_evaluator(tmp_path):
+    """The seam is only worth anything if something actually uses it.
+
+    AccountDiscoverer used to construct AccountFitnessEvaluator without a
+    provider, so the GA always took the legacy branch and scored on Twitter
+    profile fields that syndication.twitter.com no longer serves -- every
+    candidate 0.0, no selection pressure. No discovery is run here; the
+    assertion is on the wiring.
+    """
+    from x_pathfinder.account_discoverer import AccountDiscoverer
+
+    provider = _StubProvider({})
+    discoverer = AccountDiscoverer(
+        niche="ai", provider=provider, knowledge_dir=str(tmp_path)
+    )
+
+    assert discoverer.fitness.provider is provider
+
+
+def test_discoverer_without_a_provider_keeps_the_legacy_path(tmp_path):
+    """Default must not change behaviour for the CLI or existing callers."""
+    from x_pathfinder.account_discoverer import AccountDiscoverer
+
+    discoverer = AccountDiscoverer(niche="ai", knowledge_dir=str(tmp_path))
+
+    assert discoverer.fitness.provider is None
+
+
 def test_xaccount_to_dict_from_dict_roundtrip_preserves_fitness_fields():
     account = XAccount(
         handle="alpha",
