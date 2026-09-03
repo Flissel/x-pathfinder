@@ -41,7 +41,21 @@ def _tool_discover(niche: str = "ai", generations: int = 3, top: int = 20,
         niche=niche, max_concurrent=concurrent, provider=provider
     )
     accounts = asyncio.run(discoverer.run(generations=generations))
+
+    db = _database()
+    try:
+        # Spec §6: discovery -> stage DB. AccountDiscoverer only writes
+        # KnowledgeAccumulator JSON, so without this xpf_score could only
+        # ever see rows the email daemon happened to leave behind. Stage is
+        # the unfiltered tier by design -- everything lands here, unscored
+        # candidates included -- because nothing here is trusted yet. Only
+        # the validator's verdict lets a row leave for Supabase.
+        staged = db.save_scored_accounts(accounts)
+    finally:
+        db.close()
+
     return {"discovered": len(accounts),
+            "staged": staged,
             "handles": [a.handle for a in accounts[:top]]}
 
 

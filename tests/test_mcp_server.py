@@ -32,6 +32,55 @@ def test_handler_exception_is_returned_as_error_payload():
         TOOLS["xpf_status"] = _tool_status
 
 
+def test_discover_stages_its_results_and_uses_the_provider(monkeypatch):
+    """Two wiring facts in one run, neither of which held before.
+
+    1. AccountDiscoverer receives a CompositeScorer, so the GA scores
+       through the provider seam instead of the dead Twitter fields.
+    2. The discovered accounts are written to the stage DB. Without that,
+       xpf_score could only ever see rows the email daemon left behind and
+       the spec's discovery -> stage step was unwired.
+    """
+    from x_pathfinder import account_discoverer as ad_module
+    from x_pathfinder import mcp_server
+    from x_pathfinder.composite_scorer import CompositeScorer
+    from x_pathfinder.models import XAccount
+
+    discovered = [XAccount(handle="alpha", niche="ai"),
+                  XAccount(handle="beta", niche="ai")]
+    constructed = []
+    saved = []
+    closed = []
+
+    class _FakeDiscoverer:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+        async def run(self, generations=15, on_progress=None):
+            return discovered
+
+    class _FakeDb:
+        def save_scored_accounts(self, accounts):
+            saved.extend(accounts)
+            return len(accounts)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ad_module, "AccountDiscoverer", _FakeDiscoverer)
+    monkeypatch.setattr(mcp_server, "_database", lambda: _FakeDb())
+
+    result = handle_call("xpf_discover", {"niche": "ai", "generations": 1, "top": 1})
+
+    assert result["ok"] is True
+    assert result["result"] == {
+        "discovered": 2, "staged": 2, "handles": ["alpha"],
+    }
+    assert [a.handle for a in saved] == ["alpha", "beta"]
+    assert closed == [True], "the database handle must be closed"
+    assert isinstance(constructed[0]["provider"], CompositeScorer)
+
+
 def test_validate_skips_rows_with_no_evidence_instead_of_refuting_them(monkeypatch):
     """No evidence is not a refutation.
 
