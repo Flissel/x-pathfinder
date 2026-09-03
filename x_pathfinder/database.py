@@ -59,6 +59,7 @@ class EmailDatabase:
                     smtp_valid SMALLINT DEFAULT -1,
                     strategy_id TEXT DEFAULT '',
                     domain TEXT DEFAULT '',
+                    country TEXT DEFAULT 'XX',
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 );
 
@@ -80,6 +81,24 @@ class EmailDatabase:
                     emails_verified INTEGER DEFAULT 0,
                     status TEXT DEFAULT 'running'
                 );
+
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS fitness_score REAL DEFAULT 0.0;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS fitness_source TEXT DEFAULT 'unscored';
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS signals JSONB;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS evidence_urls JSONB;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS validated BOOLEAN DEFAULT NULL;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS verdict_reason TEXT;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+                ALTER TABLE accounts ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
+
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS fitness_score REAL DEFAULT 0.0;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS fitness_source TEXT DEFAULT 'unscored';
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS signals JSONB;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS evidence_urls JSONB;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS validated BOOLEAN DEFAULT NULL;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS verdict_reason TEXT;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS validated_at TIMESTAMPTZ;
+                ALTER TABLE emails ADD COLUMN IF NOT EXISTS promoted_at TIMESTAMPTZ;
 
                 CREATE INDEX IF NOT EXISTS idx_emails_handle ON emails(handle);
                 CREATE INDEX IF NOT EXISTS idx_emails_mx ON emails(mx_valid);
@@ -126,6 +145,179 @@ class EmailDatabase:
                     for a in accounts
                 ],
             )
+
+    def save_scored_accounts(self, accounts) -> int:
+        """Write every scored account to stage, unfiltered and unvalidated."""
+        import json
+
+        conn = self._get_conn()
+        written = 0
+        with conn.cursor() as cur:
+            for account in accounts:
+                cur.execute(
+                    """INSERT INTO accounts
+                       (handle, display_name, bio, followers, niche, source,
+                        fitness_score, fitness_source, signals, evidence_urls)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (handle) DO UPDATE SET
+                           fitness_score = EXCLUDED.fitness_score,
+                           fitness_source = EXCLUDED.fitness_source,
+                           signals = EXCLUDED.signals,
+                           evidence_urls = EXCLUDED.evidence_urls,
+                           -- Re-scoring INVALIDATES the prior verdict. The
+                           -- refreshed evidence_urls above were never fetched
+                           -- by the validator, and verdict_reason cites a URL
+                           -- that may no longer be in the row at all. Keeping
+                           -- validated=TRUE here would promote unverified
+                           -- evidence to Supabase, defeating the one guarantee
+                           -- this pipeline exists to make. NULL (not FALSE)
+                           -- means "not yet checked", which is the truth.
+                           validated = NULL,
+                           verdict_reason = NULL,
+                           validated_at = NULL""",
+                    (
+                        account.handle,
+                        account.display_name,
+                        account.bio,
+                        account.followers,
+                        account.niche,
+                        account.discovered_by,
+                        account.fitness_score,
+                        account.fitness_source,
+                        # default=str so one exotic signal value can never
+                        # take down the whole stage write.
+                        json.dumps(dict(getattr(account, "signals", None) or {}),
+                                   default=str),
+                        json.dumps(list(account.evidence_urls)),
+                    ),
+                )
+                written += 1
+        conn.commit()
+        return written
+
+    def save_discovered_accounts(self, accounts) -> int:
+        """Stage a discovery run's output without disturbing existing verdicts.
+
+        Deliberately NOT save_scored_accounts. AccountDiscoverer.run()
+        returns every account seen in the session, not only the new ones, so
+        a second xpf_discover restages rows that have already been scored and
+        validated. Through save_scored_accounts that would (correctly, per its
+        own contract) reset the verdict — but the "re-score" it is reacting to
+        never happened: rediscovery carries no new evidence, only deterministic
+        placeholders. The result was a confirmed row losing its evidence_urls,
+        verdict_reason and signals to empty values, which destroys the audit
+        trail the spec requires ("Abgelehnte Kandidaten bleiben in Stage MIT
+        Ablehnungsgrund stehen — auditierbar") and can strand a row that was
+        already confirmed.
+
+        So: a new handle is inserted exactly as the scoring path inserts it
+        (legitimately unscored, unvalidated, no evidence), and an existing
+        handle has ONLY its discovery fields refreshed. Scoring and verdict
+        columns are the scoring path's to write, and are left alone here.
+        """
+        import json
+
+        conn = self._get_conn()
+        written = 0
+        with conn.cursor() as cur:
+            for account in accounts:
+                cur.execute(
+                    """INSERT INTO accounts
+                       (handle, display_name, bio, followers, niche, source,
+                        fitness_score, fitness_source, signals, evidence_urls)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                       ON CONFLICT (handle) DO UPDATE SET
+                           display_name = EXCLUDED.display_name,
+                           bio = EXCLUDED.bio,
+                           followers = EXCLUDED.followers,
+                           niche = EXCLUDED.niche,
+                           source = EXCLUDED.source""",
+                    # fitness_score/fitness_source/signals/evidence_urls are
+                    # bound for the INSERT branch only (a brand-new row is
+                    # allowed to carry whatever the GA scored it as); the
+                    # UPDATE branch above deliberately omits them, along with
+                    # validated / verdict_reason / validated_at / promoted_at.
+                    (
+                        account.handle,
+                        account.display_name,
+                        account.bio,
+                        account.followers,
+                        account.niche,
+                        account.discovered_by,
+                        account.fitness_score,
+                        account.fitness_source,
+                        json.dumps(dict(getattr(account, "signals", None) or {}),
+                                   default=str),
+                        json.dumps(list(account.evidence_urls)),
+                    ),
+                )
+                written += 1
+        conn.commit()
+        return written
+
+    def get_unvalidated(self, limit: int = 100):
+        """Stage rows that have not been through the validator yet."""
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT handle, niche, fitness_score, fitness_source,
+                          signals, evidence_urls, validated, verdict_reason
+                   FROM accounts WHERE validated IS NULL
+                   ORDER BY fitness_score DESC LIMIT %s""",
+                (limit,),
+            )
+            columns = [d[0] for d in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def get_validated_unpromoted(self, limit: int = 100):
+        """Rows the validator confirmed that have not yet been promoted.
+
+        This is deliberately the opposite selection of get_unvalidated():
+        validated IS NULL means "not yet checked", while this method needs
+        validated IS TRUE (checked and confirmed) AND promoted_at IS NULL
+        (the promotion gate has not acted on it yet). Reusing
+        get_unvalidated() here would look plausible but would select rows
+        the validator hasn't touched, so the promotion gate would silently
+        promote nothing forever.
+        """
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                # `signals` is deliberately NOT selected here: these rows are
+                # handed verbatim to SupabaseWriter.insert(), and the target
+                # table is not defined yet (deferred). get_unvalidated()
+                # carries signals, which is where auditing the verdict
+                # actually happens.
+                """SELECT handle, niche, fitness_score, fitness_source,
+                          evidence_urls, validated, verdict_reason,
+                          promoted_at
+                   FROM accounts
+                   WHERE validated IS TRUE AND promoted_at IS NULL
+                   ORDER BY fitness_score DESC LIMIT %s""",
+                (limit,),
+            )
+            columns = [d[0] for d in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def mark_promoted(self, handle: str):
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE accounts SET promoted_at = NOW() WHERE handle = %s",
+                (handle,),
+            )
+        conn.commit()
+
+    def record_verdict(self, handle: str, validated: bool, reason: str):
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE accounts
+                   SET validated = %s, verdict_reason = %s, validated_at = NOW()
+                   WHERE handle = %s""",
+                (validated, reason, handle),
+            )
+        conn.commit()
 
     def get_account_count(self) -> int:
         conn = self._get_conn()

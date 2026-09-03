@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x-pathfinder"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp",
+    "beautifulsoup4",
+    "flask",
+    "psycopg2-binary",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["x_pathfinder"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
