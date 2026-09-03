@@ -85,6 +85,18 @@ def test_signals_are_persisted_not_written_as_an_empty_object(db):
     }
 
 
+def test_stage_row_carries_its_niche_back_out(db):
+    """ResearchScorer reads the niche off the batch and falls back to
+    'general'; get_unvalidated() did not select the column at all, so every
+    xpf_score researched against a generic niche, silently."""
+    db.save_scored_accounts([XAccount(handle="acme", niche="security")])
+
+    assert db.get_unvalidated()[0]["niche"] == "security"
+
+    db.record_verdict("acme", True, "confirmed")
+    assert db.get_validated_unpromoted()[0]["niche"] == "security"
+
+
 def test_rescoring_invalidates_a_previous_verdict(db):
     """A verdict must not survive the evidence it was based on.
 

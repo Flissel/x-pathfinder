@@ -130,6 +130,67 @@ def test_validate_skips_rows_with_no_evidence_instead_of_refuting_them(monkeypat
     assert [handle for handle, _, _ in verdicts] == ["hasevidence"]
 
 
+def test_score_carries_the_stage_niche_through_to_the_research_scorer(monkeypatch):
+    """_tool_score built XAccount(handle=...) with no niche, and
+    ResearchScorer reads the niche off candidates[0] with a "general"
+    fallback -- so every xpf_score researched against a generic niche.
+    This drives the real CompositeScorer/ResearchScorer with stubbed IO and
+    asserts on the prompt that actually goes out.
+    """
+    from x_pathfinder import fitness_providers as fp_module
+    from x_pathfinder import mcp_server
+    from x_pathfinder import research_scorer as rs_module
+
+    prompts = []
+
+    class _FakeDb:
+        saved = None
+
+        def get_unvalidated(self, limit=100):
+            return [{"handle": "acme", "niche": "security"}]
+
+        def save_scored_accounts(self, accounts):
+            type(self).saved = list(accounts)
+            return len(accounts)
+
+        def close(self):
+            pass
+
+    def _transport(message):
+        prompts.append(message)
+        return ('{"results": [{"handle": "acme", "score": 90, '
+                '"evidence_urls": ["https://news.example/acme"], '
+                '"reason": "series A"}]}')
+
+    real_deterministic = fp_module.DeterministicScorer
+    real_research = rs_module.ResearchScorer
+    monkeypatch.setattr(mcp_server, "_database", lambda: _FakeDb())
+    monkeypatch.setattr(
+        fp_module, "DeterministicScorer",
+        lambda *a, **k: real_deterministic(resolver=lambda url: 200),
+    )
+    monkeypatch.setattr(
+        rs_module, "ResearchScorer",
+        lambda *a, **k: real_research(transport=_transport),
+    )
+
+    result = handle_call("xpf_score", {})
+
+    assert result["ok"] is True
+    assert prompts, "the research scorer was never reached"
+    assert 'niche "security"' in prompts[0]
+    assert 'niche "general"' not in prompts[0]
+
+    saved = _FakeDb.saved
+    assert saved[0].niche == "security"
+    # Signals from both scorers survive to the stage write (FIX 6).
+    assert saved[0].signals == {
+        "handle_wellformed": True,
+        "profile_resolves": True,
+        "reason": "series A",
+    }
+
+
 @pytest.mark.parametrize(
     "url",
     [

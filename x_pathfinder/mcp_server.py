@@ -68,7 +68,14 @@ def _tool_score(limit: int = 50, **_):
     db = _database()
     try:
         rows = db.get_unvalidated(limit=limit)
-        candidates = [XAccount(handle=row["handle"]) for row in rows]
+        # The niche must come along: ResearchScorer takes it from the batch
+        # and falls back to "general", so dropping it here silently
+        # researched every candidate against a generic niche -- which is
+        # exactly the relevance this scoring exists to provide.
+        candidates = [
+            XAccount(handle=row["handle"], niche=row.get("niche") or "")
+            for row in rows
+        ]
         scorer = CompositeScorer(DeterministicScorer(), ResearchScorer())
         results = scorer.score_batch(candidates)
         for candidate in candidates:

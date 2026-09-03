@@ -200,7 +200,7 @@ class EmailDatabase:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT handle, fitness_score, fitness_source,
+                """SELECT handle, niche, fitness_score, fitness_source,
                           signals, evidence_urls, validated, verdict_reason
                    FROM accounts WHERE validated IS NULL
                    ORDER BY fitness_score DESC LIMIT %s""",
@@ -223,8 +223,14 @@ class EmailDatabase:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT handle, fitness_score, fitness_source, evidence_urls,
-                          validated, verdict_reason, promoted_at
+                # `signals` is deliberately NOT selected here: these rows are
+                # handed verbatim to SupabaseWriter.insert(), and the target
+                # table is not defined yet (deferred). get_unvalidated()
+                # carries signals, which is where auditing the verdict
+                # actually happens.
+                """SELECT handle, niche, fitness_score, fitness_source,
+                          evidence_urls, validated, verdict_reason,
+                          promoted_at
                    FROM accounts
                    WHERE validated IS TRUE AND promoted_at IS NULL
                    ORDER BY fitness_score DESC LIMIT %s""",
