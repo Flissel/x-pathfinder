@@ -32,6 +32,55 @@ def test_handler_exception_is_returned_as_error_payload():
         TOOLS["xpf_status"] = _tool_status
 
 
+def test_validate_skips_rows_with_no_evidence_instead_of_refuting_them(monkeypatch):
+    """No evidence is not a refutation.
+
+    get_unvalidated() selects validated IS NULL, so a FALSE written for a
+    row that had nothing to check would exclude it from the validator
+    forever — even after xpf_score gave it real evidence. Calling
+    xpf_validate before xpf_score would then permanently kill every
+    candidate the email daemon inserted.
+    """
+    from x_pathfinder import mcp_server
+    from x_pathfinder import validator as validator_module
+
+    verdicts = []
+
+    class _FakeDb:
+        def get_unvalidated(self, limit=100):
+            return [
+                {"handle": "hasevidence", "evidence_urls": ["https://a.example"]},
+                {"handle": "emptylist", "evidence_urls": []},
+                {"handle": "nullcolumn", "evidence_urls": None},
+            ]
+
+        def record_verdict(self, handle, validated, reason):
+            verdicts.append((handle, validated, reason))
+
+        def close(self):
+            pass
+
+    real_validator = validator_module.EvidenceValidator
+    monkeypatch.setattr(mcp_server, "_database", lambda: _FakeDb())
+    monkeypatch.setattr(
+        validator_module,
+        "EvidenceValidator",
+        lambda *a, **k: real_validator(
+            fetcher=lambda url: (200, "hasevidence is mentioned here")
+        ),
+    )
+
+    result = handle_call("xpf_validate", {})
+
+    assert result["ok"] is True
+    assert result["result"] == {
+        "checked": 1, "confirmed": 1, "skipped_no_evidence": 2,
+    }
+    # The decisive assertion: no verdict was written for the two rows that
+    # had nothing to verify.
+    assert [handle for handle, _, _ in verdicts] == ["hasevidence"]
+
+
 def test_promote_uses_get_validated_unpromoted_not_get_unvalidated():
     """Wiring check: _tool_promote must source rows from
     get_validated_unpromoted(), never get_unvalidated().

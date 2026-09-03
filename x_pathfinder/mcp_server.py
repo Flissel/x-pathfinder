@@ -65,15 +65,25 @@ def _tool_validate(limit: int = 50, **_):
     db = _database()
     try:
         validator = EvidenceValidator()
-        checked = confirmed = 0
+        checked = confirmed = skipped = 0
         for row in db.get_unvalidated(limit=limit):
-            verdict = validator.validate(
-                row["handle"], row.get("evidence_urls") or [], [row["handle"]]
-            )
+            evidence = row.get("evidence_urls") or []
+            if not evidence:
+                # A row with nothing to verify has not been refuted — it has
+                # not been examined. Writing validated=FALSE here used to be
+                # permanent: get_unvalidated() selects validated IS NULL, so
+                # the row could never re-enter the validator even after
+                # xpf_score gave it real evidence. One wrong tool ordering
+                # (xpf_validate before xpf_score) therefore killed every
+                # candidate the email daemon had inserted.
+                skipped += 1
+                continue
+            verdict = validator.validate(row["handle"], evidence, [row["handle"]])
             db.record_verdict(row["handle"], verdict.validated, verdict.reason)
             checked += 1
             confirmed += 1 if verdict.validated else 0
-        return {"checked": checked, "confirmed": confirmed}
+        return {"checked": checked, "confirmed": confirmed,
+                "skipped_no_evidence": skipped}
     finally:
         db.close()
 
