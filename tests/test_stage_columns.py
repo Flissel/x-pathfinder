@@ -64,6 +64,27 @@ def test_save_scored_accounts_persists_everything_unvalidated(db):
     assert rows["weak"]["fitness_source"] == "unscored"
 
 
+def test_signals_are_persisted_not_written_as_an_empty_object(db):
+    """save_scored_accounts used to hardcode json.dumps({}), so the
+    evidence behind a score was thrown away at the stage boundary and a
+    promotion decision could never be audited after the fact."""
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", fitness_score=82.0,
+                 fitness_source="composite",
+                 signals={"handle_wellformed": True,
+                          "profile_resolves": True,
+                          "reason": "series A announced"},
+                 evidence_urls=["https://news.example/acme"]),
+    ])
+
+    row = db.get_unvalidated()[0]
+    assert row["signals"] == {
+        "handle_wellformed": True,
+        "profile_resolves": True,
+        "reason": "series A announced",
+    }
+
+
 def test_rescoring_invalidates_a_previous_verdict(db):
     """A verdict must not survive the evidence it was based on.
 

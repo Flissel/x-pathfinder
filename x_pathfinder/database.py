@@ -184,7 +184,10 @@ class EmailDatabase:
                         account.discovered_by,
                         account.fitness_score,
                         account.fitness_source,
-                        json.dumps({}),
+                        # default=str so one exotic signal value can never
+                        # take down the whole stage write.
+                        json.dumps(dict(getattr(account, "signals", None) or {}),
+                                   default=str),
                         json.dumps(list(account.evidence_urls)),
                     ),
                 )
@@ -197,8 +200,8 @@ class EmailDatabase:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT handle, fitness_score, fitness_source, evidence_urls,
-                          validated, verdict_reason
+                """SELECT handle, fitness_score, fitness_source,
+                          signals, evidence_urls, validated, verdict_reason
                    FROM accounts WHERE validated IS NULL
                    ORDER BY fitness_score DESC LIMIT %s""",
                 (limit,),

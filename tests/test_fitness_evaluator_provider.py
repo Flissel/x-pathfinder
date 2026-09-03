@@ -75,6 +75,60 @@ def test_dropped_candidate_clears_stale_evidence_alongside_score_and_source():
     assert evaluated[0].evidence_urls == []
 
 
+def test_provider_signals_land_on_the_account(tmp_path):
+    """A score without its signals is an unauditable number."""
+    accounts = [XAccount(handle="alpha")]
+    provider = _StubProvider(
+        {
+            "alpha": FitnessResult(
+                score=90.0,
+                source=SOURCE_COMPOSITE,
+                signals={"handle_wellformed": True, "reason": "raised a round"},
+                evidence_urls=("https://a.example",),
+            )
+        }
+    )
+    evaluated = AccountFitnessEvaluator(niche="ai", provider=provider).batch_evaluate(accounts)
+
+    assert evaluated[0].signals == {
+        "handle_wellformed": True, "reason": "raised a round",
+    }
+
+
+def test_dropped_candidate_clears_stale_signals_too():
+    """Signals reset with score, source and evidence -- they describe the
+    same, now-superseded scoring pass and must never disagree with it."""
+    accounts = [
+        XAccount(
+            handle="alpha",
+            fitness_score=90.0,
+            fitness_source=SOURCE_COMPOSITE,
+            signals={"reason": "stale"},
+            evidence_urls=["https://old.example"],
+        )
+    ]
+    evaluated = AccountFitnessEvaluator(
+        niche="ai", provider=_StubProvider({})
+    ).batch_evaluate(accounts)
+
+    assert evaluated[0].signals == {}
+    assert evaluated[0].evidence_urls == []
+    assert evaluated[0].fitness_source == SOURCE_UNSCORED
+
+
+def test_xaccount_signals_survive_a_dict_roundtrip():
+    account = XAccount(handle="alpha", signals={"profile_resolves": True})
+    restored = XAccount.from_dict(account.to_dict())
+    assert restored.signals == {"profile_resolves": True}
+
+
+def test_xaccount_from_dict_defaults_signals_for_old_data():
+    """Dicts written before the field existed carry no key; an explicit
+    null must not restore as None either."""
+    assert XAccount.from_dict({"handle": "x"}).signals == {}
+    assert XAccount.from_dict({"handle": "x", "signals": None}).signals == {}
+
+
 def test_discoverer_hands_its_provider_to_the_fitness_evaluator(tmp_path):
     """The seam is only worth anything if something actually uses it.
 

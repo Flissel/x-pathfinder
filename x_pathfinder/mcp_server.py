@@ -77,10 +77,47 @@ def _tool_score(limit: int = 50, **_):
                 continue
             candidate.fitness_score = 0.0 if result.score is None else result.score
             candidate.fitness_source = result.source
+            candidate.signals = dict(result.signals or {})
             candidate.evidence_urls = list(result.evidence_urls)
         return {"scored": db.save_scored_accounts(candidates)}
     finally:
         db.close()
+
+
+_SELF_CITATION_HOSTS = {
+    "x.com", "twitter.com", "mobile.x.com", "mobile.twitter.com",
+}
+
+
+def _is_self_citation(url, handle) -> bool:
+    """True when this URL is the candidate's own X/Twitter page.
+
+    The research agent picks its own evidence URLs, so left unchecked it
+    can cite https://x.com/<handle> and certify the candidate with the
+    candidate's own profile. That is a self-report, and the whole point of
+    the validator is that verdicts come from independent re-query.
+
+    Sub-paths count too (`x.com/<handle>/status/1` is content the candidate
+    authored), otherwise the filter is evaded by appending a segment.
+    """
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(str(url))
+    except Exception:
+        return False  # unparseable: leave it to the validator, which fails closed
+
+    host = (parsed.netloc or "").rsplit("@", 1)[-1].split(":")[0].lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if host not in _SELF_CITATION_HOSTS:
+        return False
+
+    own = str(handle or "").strip().lstrip("@").lower()
+    if not own:
+        return False
+    path = (parsed.path or "").strip("/").lower()
+    return path == own or path.startswith(f"{own}/")
 
 
 def _tool_validate(limit: int = 50, **_):
@@ -91,7 +128,10 @@ def _tool_validate(limit: int = 50, **_):
         validator = EvidenceValidator()
         checked = confirmed = skipped = 0
         for row in db.get_unvalidated(limit=limit):
-            evidence = row.get("evidence_urls") or []
+            evidence = [
+                url for url in (row.get("evidence_urls") or [])
+                if not _is_self_citation(url, row["handle"])
+            ]
             if not evidence:
                 # A row with nothing to verify has not been refuted — it has
                 # not been examined. Writing validated=FALSE here used to be

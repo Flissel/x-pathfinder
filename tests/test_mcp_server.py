@@ -130,6 +130,84 @@ def test_validate_skips_rows_with_no_evidence_instead_of_refuting_them(monkeypat
     assert [handle for handle, _, _ in verdicts] == ["hasevidence"]
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://x.com/acme",
+        "https://X.com/ACME",
+        "http://twitter.com/acme",
+        "https://www.twitter.com/acme/",
+        "https://mobile.twitter.com/acme",
+        "https://x.com/acme/status/1234567890",
+    ],
+)
+def test_self_citation_urls_are_rejected(url):
+    from x_pathfinder.mcp_server import _is_self_citation
+
+    assert _is_self_citation(url, "acme") is True
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://news.example/acme-raises-series-a",
+        "https://x.com/someoneelse",
+        "https://x.com/someoneelse/status/1",
+        "https://acme.example/about",
+        "https://xcom.example/acme",
+    ],
+)
+def test_third_party_urls_are_not_treated_as_self_citation(url):
+    from x_pathfinder.mcp_server import _is_self_citation
+
+    assert _is_self_citation(url, "acme") is False
+
+
+def test_a_candidate_citing_only_itself_is_not_validated(monkeypatch):
+    """The research agent picks its own evidence URLs, so without this it
+    can cite the candidate's own profile and self-certify. With nothing
+    independent left to check, the row is skipped (unexamined), not
+    refuted -- the same rule as a row with no evidence at all."""
+    from x_pathfinder import mcp_server
+    from x_pathfinder import validator as validator_module
+
+    verdicts = []
+    fetched = []
+
+    class _FakeDb:
+        def get_unvalidated(self, limit=100):
+            return [{
+                "handle": "acme",
+                "evidence_urls": ["https://x.com/acme",
+                                  "https://twitter.com/acme/status/9"],
+            }]
+
+        def record_verdict(self, handle, validated, reason):
+            verdicts.append((handle, validated, reason))
+
+        def close(self):
+            pass
+
+    def _fetch(url):
+        fetched.append(url)
+        return 200, "acme acme acme"   # would validate if it were ever reached
+
+    real_validator = validator_module.EvidenceValidator
+    monkeypatch.setattr(mcp_server, "_database", lambda: _FakeDb())
+    monkeypatch.setattr(
+        validator_module, "EvidenceValidator",
+        lambda *a, **k: real_validator(fetcher=_fetch),
+    )
+
+    result = handle_call("xpf_validate", {})
+
+    assert result["result"] == {
+        "checked": 0, "confirmed": 0, "skipped_no_evidence": 1,
+    }
+    assert verdicts == [], "self-citation must not produce a verdict"
+    assert fetched == [], "self-cited URLs must never even be fetched"
+
+
 def test_promote_uses_get_validated_unpromoted_not_get_unvalidated():
     """Wiring check: _tool_promote must source rows from
     get_validated_unpromoted(), never get_unvalidated().

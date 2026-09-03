@@ -27,6 +27,10 @@ class XAccount:
     discovered_by: str = ""  # Strategy ID that found this account
     fitness_score: float = 0.0
     fitness_source: str = "unscored"
+    # What the scorer actually observed. Persisted alongside the verdict so
+    # a promotion decision can be audited after the fact instead of resting
+    # on a bare number.
+    signals: Dict[str, Any] = field(default_factory=dict)
     evidence_urls: List[str] = field(default_factory=list)
     niche: str = ""
     recent_tweets: List[str] = field(default_factory=list)
@@ -47,6 +51,7 @@ class XAccount:
             "discovered_by": self.discovered_by,
             "fitness_score": self.fitness_score,
             "fitness_source": self.fitness_source,
+            "signals": self.signals,
             "evidence_urls": self.evidence_urls,
             "niche": self.niche,
             "recent_tweets": self.recent_tweets,
@@ -69,6 +74,9 @@ class XAccount:
             discovered_by=data.get("discovered_by", ""),
             fitness_score=data.get("fitness_score", 0.0),
             fitness_source=data.get("fitness_source", "unscored"),
+            # `or {}` (not a plain default) so data written before this
+            # field existed, or with an explicit null, still restores.
+            signals=data.get("signals") or {},
             evidence_urls=data.get("evidence_urls", []),
             niche=data.get("niche", ""),
             recent_tweets=data.get("recent_tweets", []),

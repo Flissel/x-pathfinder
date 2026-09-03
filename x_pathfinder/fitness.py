@@ -263,10 +263,12 @@ class AccountFitnessEvaluator:
                 if result is None:
                     account.fitness_score = 0.0
                     account.fitness_source = "unscored"
+                    account.signals = {}
                     account.evidence_urls = []
                     continue
                 account.fitness_score = 0.0 if result.score is None else result.score
                 account.fitness_source = result.source
+                account.signals = dict(result.signals or {})
                 account.evidence_urls = list(result.evidence_urls)
         accounts.sort(key=lambda a: a.fitness_score, reverse=True)
         return accounts
