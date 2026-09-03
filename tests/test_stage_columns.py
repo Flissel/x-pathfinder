@@ -64,6 +64,64 @@ def test_save_scored_accounts_persists_everything_unvalidated(db):
     assert rows["weak"]["fitness_source"] == "unscored"
 
 
+def test_rescoring_invalidates_a_previous_verdict(db):
+    """A verdict must not survive the evidence it was based on.
+
+    validate -> re-score -> promote used to ship a row still marked
+    validated=TRUE whose evidence_urls had been overwritten (possibly with
+    a URL that 404s) and whose verdict_reason cited a URL no longer in the
+    row. The validator never saw the new evidence, so the row must fall
+    back to "not yet checked" (NULL), not stay confirmed.
+    """
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", fitness_score=90.0,
+                 fitness_source="composite",
+                 evidence_urls=["https://good.example"]),
+    ])
+    db.record_verdict("acme", True, "claim confirmed at https://good.example")
+    assert [row["handle"] for row in db.get_validated_unpromoted()] == ["acme"]
+
+    # Re-score: same handle, different (unverified) evidence.
+    db.save_scored_accounts([
+        XAccount(handle="acme", niche="ai", fitness_score=91.0,
+                 fitness_source="composite",
+                 evidence_urls=["https://404.example"]),
+    ])
+
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT validated, verdict_reason, validated_at, evidence_urls "
+            "FROM accounts WHERE handle = 'acme';"
+        )
+        validated, reason, validated_at, evidence = cur.fetchone()
+
+    assert validated is None, "re-scored row must read as not-yet-checked"
+    assert reason is None
+    assert validated_at is None
+    assert evidence == ["https://404.example"]
+    # And therefore it is no longer promotable until re-validated.
+    assert db.get_validated_unpromoted() == []
+    assert [row["handle"] for row in db.get_unvalidated()] == ["acme"]
+
+
+def test_rescoring_also_clears_a_refutation(db):
+    """The reset is symmetric: FALSE is a verdict too, and it was reached
+    against evidence this re-score has just replaced."""
+    db.save_scored_accounts([XAccount(handle="ghost", niche="ai")])
+    db.record_verdict("ghost", False, "no evidence urls to check")
+
+    db.save_scored_accounts([
+        XAccount(handle="ghost", niche="ai", fitness_score=70.0,
+                 fitness_source="composite",
+                 evidence_urls=["https://found-later.example"]),
+    ])
+
+    rows = {row["handle"]: row for row in db.get_unvalidated()}
+    assert "ghost" in rows, "a re-scored row must be re-examinable"
+    assert rows["ghost"]["validated"] is None
+    assert rows["ghost"]["evidence_urls"] == ["https://found-later.example"]
+
+
 def test_get_validated_unpromoted_returns_only_validated_not_promoted(db):
     """The promotion gate needs rows the validator confirmed and that have
     not been promoted yet — the opposite selection of get_unvalidated().

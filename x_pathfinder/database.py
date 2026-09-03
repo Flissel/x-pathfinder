@@ -163,7 +163,18 @@ class EmailDatabase:
                            fitness_score = EXCLUDED.fitness_score,
                            fitness_source = EXCLUDED.fitness_source,
                            signals = EXCLUDED.signals,
-                           evidence_urls = EXCLUDED.evidence_urls""",
+                           evidence_urls = EXCLUDED.evidence_urls,
+                           -- Re-scoring INVALIDATES the prior verdict. The
+                           -- refreshed evidence_urls above were never fetched
+                           -- by the validator, and verdict_reason cites a URL
+                           -- that may no longer be in the row at all. Keeping
+                           -- validated=TRUE here would promote unverified
+                           -- evidence to Supabase, defeating the one guarantee
+                           -- this pipeline exists to make. NULL (not FALSE)
+                           -- means "not yet checked", which is the truth.
+                           validated = NULL,
+                           verdict_reason = NULL,
+                           validated_at = NULL""",
                     (
                         account.handle,
                         account.display_name,
